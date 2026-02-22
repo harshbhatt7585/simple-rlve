@@ -262,10 +262,11 @@ class MetricsJSONLCallback(TrainerCallback):
     def on_log(self, args, state, control, logs=None, **kwargs):  # noqa: ANN001
         if not state.is_local_process_zero or not logs:
             return
+        excluded_keys = {"reward_std", "learning_rate", "lr"}
         numeric_logs = {
             k: float(v) if isinstance(v, (int, float)) else v
             for k, v in logs.items()
-            if isinstance(v, (int, float, str))
+            if isinstance(v, (int, float, str)) and k not in excluded_keys
         }
         payload = {"global_step": int(state.global_step), "epoch": float(state.epoch or 0.0), **numeric_logs}
         with self.path.open("a", encoding="utf-8") as f:
@@ -282,14 +283,12 @@ class MetricsJSONLCallback(TrainerCallback):
             progress_pct = (100.0 * step / self.max_steps) if self.max_steps > 0 else 0.0
             LOGGER.info(
                 (
-                    "train step=%s (%.1f%%) | reward=%.3f | reward_std=%.3f | "
-                    "lr=%.2e | entropy=%.3f | comp_len=%.1f | step_time=%.2fs"
+                    "train step=%s (%.1f%%) | reward=%.3f | "
+                    "entropy=%.3f | comp_len=%.1f | step_time=%.2fs"
                 ),
                 progress,
                 progress_pct,
                 float(payload.get("reward", 0.0)),
-                float(payload.get("reward_std", 0.0)),
-                float(payload.get("learning_rate", 0.0)),
                 float(payload.get("entropy", 0.0)),
                 float(payload.get("completions/mean_length", 0.0)),
                 float(payload.get("step_time", 0.0)),
