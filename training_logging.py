@@ -199,11 +199,10 @@ class EpisodeRewardLogger:
             if (logical_step + 1) % self.terminal_log_every == 0:
                 LOGGER.info(
                     (
-                        "episode_stats step=%s | batch=%s | reward(mean=%.3f min=%.3f max=%.3f) "
+                        "episode_stats step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
                         "| acc=%.1f%% | format=%.1f%% | running_reward=%.3f"
                     ),
                     step,
-                    batch_size,
                     reward_mean,
                     reward_min,
                     reward_max,
