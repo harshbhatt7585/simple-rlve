@@ -8,23 +8,21 @@ verifiable rewards via TRL's GRPOTrainer.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import operator
 import random
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import torch
 from datasets import Dataset
+from transformers import AutoTokenizer
 from transformers.trainer_callback import PrinterCallback, ProgressCallback
-from transformers import AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
+from training_logging import EpisodeRewardLogger, MetricsJSONLCallback
+
 LOGGER = logging.getLogger("rlvr")
-ANSWER_PATTERN = re.compile(r"<answer>\s*(-?\d+)\s*</answer>", re.IGNORECASE | re.DOTALL)
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,208 +120,6 @@ class ArithmeticReasoningEnv:
             item = self.sample()
             rows.append({"prompt": item.prompt, "question": item.question, "answer": item.answer})
         return Dataset.from_list(rows)
-
-
-def _as_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        if value and isinstance(value[0], dict):
-            return str(value[0].get("content", ""))
-        return " ".join(str(x) for x in value)
-    if isinstance(value, dict):
-        return str(value.get("content", ""))
-    return str(value)
-
-
-def _extract_answer(text: str) -> str | None:
-    match = ANSWER_PATTERN.search(text)
-    if not match:
-        return None
-    return match.group(1).strip()
-
-
-def _clip_text(text: str, max_chars: int) -> str:
-    one_line = " ".join(text.split())
-    if len(one_line) <= max_chars:
-        return one_line
-    return one_line[: max(0, max_chars - 3)] + "..."
-
-
-class EpisodeRewardLogger:
-    """Custom reward function that logs every generated episode."""
-
-    def __init__(
-        self,
-        log_path: Path,
-        terminal_log_every: int = 1,
-        sample_log_every: int = 5,
-        sample_chars: int = 160,
-    ) -> None:
-        self.log_path = log_path
-        self.episode_id = 0
-        self.__name__ = "episode_reward"
-        self.terminal_log_every = max(1, terminal_log_every)
-        self.sample_log_every = max(0, sample_log_every)
-        self.sample_chars = max(40, sample_chars)
-        self.running_reward_sum = 0.0
-        self.running_episode_count = 0
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_header()
-
-    def _write_header(self) -> None:
-        self.log_path.write_text("")
-
-    def __call__(
-        self,
-        prompts: list[Any],
-        completions: list[Any],
-        answer: list[str],
-        question: list[str],
-        trainer_state=None,
-        **_: Any,
-    ) -> list[float]:
-        rewards: list[float] = []
-        step = int(trainer_state.global_step) if trainer_state is not None else -1
-        correct_count = 0
-        format_count = 0
-        sample_record: dict[str, Any] | None = None
-
-        for prompt, completion, expected, q in zip(prompts, completions, answer, question, strict=True):
-            completion_text = _as_text(completion)
-            predicted = _extract_answer(completion_text)
-
-            format_ok = "<reasoning>" in completion_text and "</reasoning>" in completion_text
-            format_ok = format_ok and "<answer>" in completion_text and "</answer>" in completion_text
-            format_reward = 0.25 if format_ok else 0.0
-
-            correct = predicted == expected
-            correctness_reward = 1.0 if correct else -0.25
-            total_reward = correctness_reward + format_reward
-            rewards.append(total_reward)
-            correct_count += int(correct)
-            format_count += int(format_ok)
-            if sample_record is None:
-                sample_record = {
-                    "question": q,
-                    "expected_answer": expected,
-                    "predicted_answer": predicted,
-                    "completion": completion_text,
-                }
-
-            log_record = {
-                "episode_id": self.episode_id,
-                "global_step": step,
-                "question": q,
-                "expected_answer": expected,
-                "predicted_answer": predicted,
-                "is_correct": correct,
-                "format_reward": format_reward,
-                "correctness_reward": correctness_reward,
-                "total_reward": total_reward,
-                "prompt": _as_text(prompt),
-                "completion": completion_text,
-            }
-            with self.log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(log_record) + "\n")
-            self.episode_id += 1
-
-        if rewards:
-            batch_size = len(rewards)
-            reward_mean = sum(rewards) / batch_size
-            reward_min = min(rewards)
-            reward_max = max(rewards)
-            accuracy = correct_count / batch_size
-            format_rate = format_count / batch_size
-            self.running_reward_sum += sum(rewards)
-            self.running_episode_count += batch_size
-            running_reward = self.running_reward_sum / self.running_episode_count
-
-            logical_step = max(step, 0)
-            if (logical_step + 1) % self.terminal_log_every == 0:
-                LOGGER.info(
-                    (
-                        "episode_stats step=%s | batch=%s | reward(mean=%.3f min=%.3f max=%.3f) "
-                        "| acc=%.1f%% | format=%.1f%% | running_reward=%.3f"
-                    ),
-                    step,
-                    batch_size,
-                    reward_mean,
-                    reward_min,
-                    reward_max,
-                    accuracy * 100.0,
-                    format_rate * 100.0,
-                    running_reward,
-                )
-                if self.sample_log_every > 0 and (logical_step + 1) % self.sample_log_every == 0 and sample_record:
-                    LOGGER.info(
-                        "sample step=%s | q=%s | expected=%s predicted=%s | completion=%s",
-                        step,
-                        sample_record["question"],
-                        sample_record["expected_answer"],
-                        sample_record["predicted_answer"],
-                        _clip_text(str(sample_record["completion"]), self.sample_chars),
-                    )
-
-        return rewards
-
-
-class MetricsJSONLCallback(TrainerCallback):
-    """Writes trainer logs to JSONL for easy plotting."""
-
-    def __init__(self, path: Path, max_steps: int, terminal_log_every: int = 1) -> None:
-        self.path = path
-        self.max_steps = max_steps
-        self.terminal_log_every = max(1, terminal_log_every)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text("")
-
-    def on_log(self, args, state, control, logs=None, **kwargs):  # noqa: ANN001
-        if not state.is_local_process_zero or not logs:
-            return
-        numeric_logs = {
-            k: float(v) if isinstance(v, (int, float)) else v
-            for k, v in logs.items()
-            if isinstance(v, (int, float, str))
-        }
-        payload = {"global_step": int(state.global_step), "epoch": float(state.epoch or 0.0), **numeric_logs}
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
-
-        step = int(payload["global_step"])
-        logical_step = max(step, 1)
-        should_log = (logical_step % self.terminal_log_every == 0) or ("train_runtime" in payload)
-        if not should_log:
-            return
-
-        if "reward" in payload:
-            progress = f"{step}/{self.max_steps}" if self.max_steps > 0 else str(step)
-            progress_pct = (100.0 * step / self.max_steps) if self.max_steps > 0 else 0.0
-            LOGGER.info(
-                (
-                    "train step=%s (%.1f%%) | reward=%.3f | reward_std=%.3f | "
-                    "lr=%.2e | entropy=%.3f | comp_len=%.1f | step_time=%.2fs"
-                ),
-                progress,
-                progress_pct,
-                float(payload.get("reward", 0.0)),
-                float(payload.get("reward_std", 0.0)),
-                float(payload.get("learning_rate", 0.0)),
-                float(payload.get("entropy", 0.0)),
-                float(payload.get("completions/mean_length", 0.0)),
-                float(payload.get("step_time", 0.0)),
-            )
-        else:
-            LOGGER.info(
-                (
-                    "train_done runtime=%.2fs | steps_per_sec=%.3f | "
-                    "samples_per_sec=%.3f | train_loss=%.4f"
-                ),
-                float(payload.get("train_runtime", 0.0)),
-                float(payload.get("train_steps_per_second", 0.0)),
-                float(payload.get("train_samples_per_second", 0.0)),
-                float(payload.get("train_loss", 0.0)),
-            )
 
 
 def maybe_make_lora_config(disable_lora: bool):
