@@ -36,6 +36,7 @@ from trl import GRPOConfig, GRPOTrainer
 from training_logging import EpisodeRewardLogger, MetricsJSONLCallback, configure_external_logs
 
 LOGGER = logging.getLogger("rlvr")
+WANDB_PROJECT = "RLVR"
 
 
 def setup_rlvr_logger(spaced_logs: bool = True) -> None:
@@ -108,10 +109,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show external library logs (HTTP requests, download/loading messages, warnings).",
     )
-    parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases tracking.")
-    parser.add_argument("--wandb_project", type=str, default="rlvr-simple")
+    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases tracking.")
     parser.add_argument("--wandb_entity", type=str, default="")
-    parser.add_argument("--wandb_run_name", type=str, default="")
     parser.add_argument(
         "--wandb_mode",
         type=str,
@@ -137,6 +136,7 @@ class ArithmeticReasoningEnv:
         "-": operator.sub,
         "*": operator.mul,
     }
+    NAME = "arithmetic_reasoning"
 
     def __init__(self, seed: int = 42, min_value: int = 0, max_value: int = 20) -> None:
         self.rng = random.Random(seed)
@@ -218,11 +218,13 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     episodes_log_path = output_dir / args.episodes_log_name
     metrics_log_path = output_dir / args.metrics_log_name
+    env = ArithmeticReasoningEnv(seed=args.seed)
+    env_name = getattr(env, "NAME", env.__class__.__name__)
 
     wandb_run = None
     report_to: str | list[str] = "none"
-    run_name = args.wandb_run_name or "minimal_rlvr_1b"
-    if args.use_wandb:
+    run_name = env_name
+    if args.wandb:
         if not can_use_local_sockets():
             LOGGER.warning("wandb unavailable in this runtime (local sockets disabled); continuing without wandb")
         else:
@@ -239,8 +241,8 @@ def main() -> None:
             os.environ.setdefault("WANDB_CACHE_DIR", str(output_dir / "wandb_cache"))
 
             wandb_kwargs: dict[str, object] = {
-                "project": args.wandb_project,
-                "name": args.wandb_run_name or None,
+                "project": WANDB_PROJECT,
+                "name": env_name,
                 "mode": args.wandb_mode,
                 "dir": str(output_dir),
                 "config": vars(args),
@@ -250,13 +252,12 @@ def main() -> None:
             try:
                 wandb_run = wandb.init(**wandb_kwargs)
                 report_to = "wandb"
-                LOGGER.info("wandb enabled | project=%s | mode=%s", args.wandb_project, args.wandb_mode)
+                LOGGER.info("wandb enabled | project=%s | run=%s | mode=%s", WANDB_PROJECT, env_name, args.wandb_mode)
             except Exception as exc:
                 wandb_run = None
                 report_to = "none"
                 LOGGER.warning("wandb init failed, continuing without wandb: %s", str(exc).splitlines()[0])
 
-    env = ArithmeticReasoningEnv(seed=args.seed)
     train_dataset = env.build_dataset(args.num_episodes)
     LOGGER.info("Dataset built with %s episodes", len(train_dataset))
 

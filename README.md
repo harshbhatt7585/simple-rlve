@@ -73,16 +73,17 @@ python train.py --show_external_logs
 ### W&B logging
 
 ```bash
-python train.py \
-  --use_wandb \
-  --wandb_project rlvr-simple \
-  --wandb_run_name llama32-1b-instruct-rlvr-run1
+python train.py --wandb
 ```
+
+W&B is fixed to:
+- project: `RLVR`
+- run name: environment name (`arithmetic_reasoning`)
 
 Offline W&B mode:
 
 ```bash
-python train.py --use_wandb --wandb_mode offline
+python train.py --wandb --wandb_mode offline
 ```
 
 Note: W&B needs local socket support. In restricted sandboxes it will auto-fallback to normal training without W&B.
