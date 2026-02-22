@@ -41,6 +41,21 @@ python train.py \
 python train.py --use_cpu --max_steps 5 --num_episodes 32
 ```
 
+### Cleaner terminal logs
+
+```bash
+python train.py \
+  --terminal_log_every 1 \
+  --sample_log_every 5 \
+  --sample_chars 160
+```
+
+Default behavior hides noisy raw trainer dict logs. If you want them back:
+
+```bash
+python train.py --keep_trainer_logs
+```
+
 ## 3) Outputs
 
 All outputs go under `--output_dir`:

@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 from datasets import Dataset
+from transformers.trainer_callback import PrinterCallback, ProgressCallback
 from transformers import AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
@@ -49,6 +50,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable_lora", action="store_true")
     parser.add_argument("--episodes_log_name", type=str, default="episode_rewards.jsonl")
     parser.add_argument("--metrics_log_name", type=str, default="training_metrics.jsonl")
+    parser.add_argument(
+        "--terminal_log_every",
+        type=int,
+        default=1,
+        help="Print compact terminal summaries every N training steps.",
+    )
+    parser.add_argument(
+        "--sample_log_every",
+        type=int,
+        default=5,
+        help="Print one sampled completion every N training steps (0 disables sample logs).",
+    )
+    parser.add_argument(
+        "--sample_chars",
+        type=int,
+        default=160,
+        help="Max characters to show for sampled completions in terminal logs.",
+    )
+    parser.add_argument(
+        "--keep_trainer_logs",
+        action="store_true",
+        help="Keep default Hugging Face trainer progress/dict logs in terminal.",
+    )
     return parser.parse_args()
 
 
@@ -119,13 +143,31 @@ def _extract_answer(text: str) -> str | None:
     return match.group(1).strip()
 
 
+def _clip_text(text: str, max_chars: int) -> str:
+    one_line = " ".join(text.split())
+    if len(one_line) <= max_chars:
+        return one_line
+    return one_line[: max(0, max_chars - 3)] + "..."
+
+
 class EpisodeRewardLogger:
     """Custom reward function that logs every generated episode."""
 
-    def __init__(self, log_path: Path) -> None:
+    def __init__(
+        self,
+        log_path: Path,
+        terminal_log_every: int = 1,
+        sample_log_every: int = 5,
+        sample_chars: int = 160,
+    ) -> None:
         self.log_path = log_path
         self.episode_id = 0
         self.__name__ = "episode_reward"
+        self.terminal_log_every = max(1, terminal_log_every)
+        self.sample_log_every = max(0, sample_log_every)
+        self.sample_chars = max(40, sample_chars)
+        self.running_reward_sum = 0.0
+        self.running_episode_count = 0
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_header()
 
@@ -143,6 +185,9 @@ class EpisodeRewardLogger:
     ) -> list[float]:
         rewards: list[float] = []
         step = int(trainer_state.global_step) if trainer_state is not None else -1
+        correct_count = 0
+        format_count = 0
+        sample_record: dict[str, Any] | None = None
 
         for prompt, completion, expected, q in zip(prompts, completions, answer, question, strict=True):
             completion_text = _as_text(completion)
@@ -156,6 +201,15 @@ class EpisodeRewardLogger:
             correctness_reward = 1.0 if correct else -0.25
             total_reward = correctness_reward + format_reward
             rewards.append(total_reward)
+            correct_count += int(correct)
+            format_count += int(format_ok)
+            if sample_record is None:
+                sample_record = {
+                    "question": q,
+                    "expected_answer": expected,
+                    "predicted_answer": predicted,
+                    "completion": completion_text,
+                }
 
             log_record = {
                 "episode_id": self.episode_id,
@@ -174,14 +228,53 @@ class EpisodeRewardLogger:
                 f.write(json.dumps(log_record) + "\n")
             self.episode_id += 1
 
+        if rewards:
+            batch_size = len(rewards)
+            reward_mean = sum(rewards) / batch_size
+            reward_min = min(rewards)
+            reward_max = max(rewards)
+            accuracy = correct_count / batch_size
+            format_rate = format_count / batch_size
+            self.running_reward_sum += sum(rewards)
+            self.running_episode_count += batch_size
+            running_reward = self.running_reward_sum / self.running_episode_count
+
+            logical_step = max(step, 0)
+            if (logical_step + 1) % self.terminal_log_every == 0:
+                LOGGER.info(
+                    (
+                        "episode_stats step=%s | batch=%s | reward(mean=%.3f min=%.3f max=%.3f) "
+                        "| acc=%.1f%% | format=%.1f%% | running_reward=%.3f"
+                    ),
+                    step,
+                    batch_size,
+                    reward_mean,
+                    reward_min,
+                    reward_max,
+                    accuracy * 100.0,
+                    format_rate * 100.0,
+                    running_reward,
+                )
+                if self.sample_log_every > 0 and (logical_step + 1) % self.sample_log_every == 0 and sample_record:
+                    LOGGER.info(
+                        "sample step=%s | q=%s | expected=%s predicted=%s | completion=%s",
+                        step,
+                        sample_record["question"],
+                        sample_record["expected_answer"],
+                        sample_record["predicted_answer"],
+                        _clip_text(str(sample_record["completion"]), self.sample_chars),
+                    )
+
         return rewards
 
 
 class MetricsJSONLCallback(TrainerCallback):
     """Writes trainer logs to JSONL for easy plotting."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, max_steps: int, terminal_log_every: int = 1) -> None:
         self.path = path
+        self.max_steps = max_steps
+        self.terminal_log_every = max(1, terminal_log_every)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text("")
 
@@ -197,10 +290,40 @@ class MetricsJSONLCallback(TrainerCallback):
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")
 
+        step = int(payload["global_step"])
+        logical_step = max(step, 1)
+        should_log = (logical_step % self.terminal_log_every == 0) or ("train_runtime" in payload)
+        if not should_log:
+            return
+
         if "reward" in payload:
-            LOGGER.info("step=%s reward=%.4f", payload["global_step"], payload["reward"])
+            progress = f"{step}/{self.max_steps}" if self.max_steps > 0 else str(step)
+            progress_pct = (100.0 * step / self.max_steps) if self.max_steps > 0 else 0.0
+            LOGGER.info(
+                (
+                    "train step=%s (%.1f%%) | reward=%.3f | reward_std=%.3f | "
+                    "lr=%.2e | entropy=%.3f | comp_len=%.1f | step_time=%.2fs"
+                ),
+                progress,
+                progress_pct,
+                float(payload.get("reward", 0.0)),
+                float(payload.get("reward_std", 0.0)),
+                float(payload.get("learning_rate", 0.0)),
+                float(payload.get("entropy", 0.0)),
+                float(payload.get("completions/mean_length", 0.0)),
+                float(payload.get("step_time", 0.0)),
+            )
         else:
-            LOGGER.info("step=%s logs=%s", payload["global_step"], numeric_logs)
+            LOGGER.info(
+                (
+                    "train_done runtime=%.2fs | steps_per_sec=%.3f | "
+                    "samples_per_sec=%.3f | train_loss=%.4f"
+                ),
+                float(payload.get("train_runtime", 0.0)),
+                float(payload.get("train_steps_per_second", 0.0)),
+                float(payload.get("train_samples_per_second", 0.0)),
+                float(payload.get("train_loss", 0.0)),
+            )
 
 
 def maybe_make_lora_config(disable_lora: bool):
@@ -263,8 +386,17 @@ def main() -> None:
     elif use_fp16:
         dtype = torch.float16
 
-    reward_fn = EpisodeRewardLogger(episodes_log_path)
-    callback = MetricsJSONLCallback(metrics_log_path)
+    reward_fn = EpisodeRewardLogger(
+        episodes_log_path,
+        terminal_log_every=args.terminal_log_every,
+        sample_log_every=args.sample_log_every,
+        sample_chars=args.sample_chars,
+    )
+    callback = MetricsJSONLCallback(
+        metrics_log_path,
+        max_steps=args.max_steps,
+        terminal_log_every=args.terminal_log_every,
+    )
     peft_config = maybe_make_lora_config(disable_lora=args.disable_lora)
 
     grpo_args = GRPOConfig(
@@ -298,6 +430,9 @@ def main() -> None:
         callbacks=[callback],
         peft_config=peft_config,
     )
+    if not args.keep_trainer_logs:
+        trainer.remove_callback(ProgressCallback)
+        trainer.remove_callback(PrinterCallback)
 
     LOGGER.info(
         "Starting RLVR training | use_cpu=%s bf16=%s fp16=%s lora=%s",
@@ -305,6 +440,17 @@ def main() -> None:
         use_bf16,
         use_fp16,
         not args.disable_lora,
+    )
+    LOGGER.info(
+        (
+            "logging config | terminal_log_every=%s | sample_log_every=%s | sample_chars=%s "
+            "| episodes_log=%s | metrics_log=%s"
+        ),
+        args.terminal_log_every,
+        args.sample_log_every,
+        args.sample_chars,
+        episodes_log_path,
+        metrics_log_path,
     )
     trainer.train()
 
