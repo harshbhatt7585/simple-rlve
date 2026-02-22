@@ -10,9 +10,22 @@ from __future__ import annotations
 import argparse
 import logging
 import operator
+import os
 import random
+import socket
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
+
+# Suppress noisy torch CUDA probe warnings before importing torch/trl.
+warnings.filterwarnings(
+    "ignore",
+    message=r"CUDA initialization: Unexpected error from cudaGetDeviceCount.*",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Can't initialize NVML",
+)
 
 import torch
 from datasets import Dataset
@@ -20,7 +33,7 @@ from transformers import AutoTokenizer
 from transformers.trainer_callback import PrinterCallback, ProgressCallback
 from trl import GRPOConfig, GRPOTrainer
 
-from training_logging import EpisodeRewardLogger, MetricsJSONLCallback
+from training_logging import EpisodeRewardLogger, MetricsJSONLCallback, configure_external_logs
 
 LOGGER = logging.getLogger("rlvr")
 
@@ -57,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sample_log_every",
         type=int,
-        default=5,
+        default=1,
         help="Print one sampled completion every N training steps (0 disables sample logs).",
     )
     parser.add_argument(
@@ -67,9 +80,31 @@ def parse_args() -> argparse.Namespace:
         help="Max characters to show for sampled completions in terminal logs.",
     )
     parser.add_argument(
+        "--prediction_log_count",
+        type=int,
+        default=1,
+        help="How many predictions to print per sampled step.",
+    )
+    parser.add_argument(
         "--keep_trainer_logs",
         action="store_true",
         help="Keep default Hugging Face trainer progress/dict logs in terminal.",
+    )
+    parser.add_argument(
+        "--show_external_logs",
+        action="store_true",
+        help="Show external library logs (HTTP requests, download/loading messages, warnings).",
+    )
+    parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases tracking.")
+    parser.add_argument("--wandb_project", type=str, default="rlvr-simple")
+    parser.add_argument("--wandb_entity", type=str, default="")
+    parser.add_argument("--wandb_run_name", type=str, default="")
+    parser.add_argument(
+        "--wandb_mode",
+        type=str,
+        default="online",
+        choices=["online", "offline", "disabled"],
+        help="W&B mode. Use offline if you want local-only logging.",
     )
     return parser.parse_args()
 
@@ -142,13 +177,26 @@ def maybe_make_lora_config(disable_lora: bool):
     )
 
 
+def can_use_local_sockets() -> bool:
+    """W&B service requires local socket support."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.close()
+        return True
+    except OSError:
+        return False
+
+
 def main() -> None:
     args = parse_args()
 
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
+        level=logging.WARNING,
+        format="%(message)s",
     )
+    LOGGER.setLevel(logging.INFO)
+    configure_external_logs(show_external_logs=args.show_external_logs)
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -157,6 +205,43 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     episodes_log_path = output_dir / args.episodes_log_name
     metrics_log_path = output_dir / args.metrics_log_name
+
+    wandb_run = None
+    report_to: str | list[str] = "none"
+    run_name = args.wandb_run_name or "minimal_rlvr_1b"
+    if args.use_wandb:
+        if not can_use_local_sockets():
+            LOGGER.warning("wandb unavailable in this runtime (local sockets disabled); continuing without wandb")
+        else:
+            try:
+                import wandb
+            except ImportError as exc:
+                raise ImportError("wandb is not installed. Install it with: pip install wandb") from exc
+
+            if not args.show_external_logs:
+                os.environ.setdefault("WANDB_SILENT", "true")
+                os.environ.setdefault("WANDB_CONSOLE", "off")
+                os.environ.setdefault("WANDB_QUIET", "true")
+            os.environ.setdefault("WANDB_DIR", str(output_dir / "wandb"))
+            os.environ.setdefault("WANDB_CACHE_DIR", str(output_dir / "wandb_cache"))
+
+            wandb_kwargs: dict[str, object] = {
+                "project": args.wandb_project,
+                "name": args.wandb_run_name or None,
+                "mode": args.wandb_mode,
+                "dir": str(output_dir),
+                "config": vars(args),
+            }
+            if args.wandb_entity:
+                wandb_kwargs["entity"] = args.wandb_entity
+            try:
+                wandb_run = wandb.init(**wandb_kwargs)
+                report_to = "wandb"
+                LOGGER.info("wandb enabled | project=%s | mode=%s", args.wandb_project, args.wandb_mode)
+            except Exception as exc:
+                wandb_run = None
+                report_to = "none"
+                LOGGER.warning("wandb init failed, continuing without wandb: %s", str(exc).splitlines()[0])
 
     env = ArithmeticReasoningEnv(seed=args.seed)
     train_dataset = env.build_dataset(args.num_episodes)
@@ -187,6 +272,8 @@ def main() -> None:
         terminal_log_every=args.terminal_log_every,
         sample_log_every=args.sample_log_every,
         sample_chars=args.sample_chars,
+        prediction_log_count=args.prediction_log_count,
+        wandb_run=wandb_run,
     )
     callback = MetricsJSONLCallback(
         metrics_log_path,
@@ -197,7 +284,7 @@ def main() -> None:
 
     grpo_args = GRPOConfig(
         output_dir=str(output_dir),
-        run_name="minimal_rlvr_1b",
+        run_name=run_name,
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
@@ -206,7 +293,7 @@ def main() -> None:
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=2,
-        report_to="none",
+        report_to=report_to,
         remove_unused_columns=False,
         use_cpu=use_cpu,
         bf16=use_bf16,
@@ -237,14 +324,17 @@ def main() -> None:
         use_fp16,
         not args.disable_lora,
     )
+    if not args.show_external_logs:
+        LOGGER.info("external logs: suppressed (use --show_external_logs to enable)")
     LOGGER.info(
         (
-            "logging config | terminal_log_every=%s | sample_log_every=%s | sample_chars=%s "
+            "logging config | terminal_log_every=%s | sample_log_every=%s | sample_chars=%s | prediction_log_count=%s "
             "| episodes_log=%s | metrics_log=%s"
         ),
         args.terminal_log_every,
         args.sample_log_every,
         args.sample_chars,
+        args.prediction_log_count,
         episodes_log_path,
         metrics_log_path,
     )
@@ -258,6 +348,11 @@ def main() -> None:
     LOGGER.info("Episode logs: %s", episodes_log_path)
     LOGGER.info("Metrics logs: %s", metrics_log_path)
     LOGGER.info("Model saved to: %s", final_dir)
+    if wandb_run is not None:
+        try:
+            wandb_run.finish()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

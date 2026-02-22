@@ -46,15 +46,44 @@ python train.py --use_cpu --max_steps 5 --num_episodes 32
 ```bash
 python train.py \
   --terminal_log_every 1 \
-  --sample_log_every 5 \
+  --sample_log_every 1 \
+  --prediction_log_count 1 \
   --sample_chars 160
 ```
+
+This prints per-step:
+- reward summary
+- prediction lines with `reward`, `expected`, `predicted`, and completion text snippet
 
 Default behavior hides noisy raw trainer dict logs. If you want them back:
 
 ```bash
 python train.py --keep_trainer_logs
 ```
+
+Default behavior also suppresses external noise (HTTP request logs, model-load chatter, warning spam).
+If you want full external logs while debugging, use:
+
+```bash
+python train.py --show_external_logs
+```
+
+### W&B logging
+
+```bash
+python train.py \
+  --use_wandb \
+  --wandb_project rlvr-simple \
+  --wandb_run_name tinyllama-rlvr-run1
+```
+
+Offline W&B mode:
+
+```bash
+python train.py --use_wandb --wandb_mode offline
+```
+
+Note: W&B needs local socket support. In restricted sandboxes it will auto-fallback to normal training without W&B.
 
 ## 3) Outputs
 

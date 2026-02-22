@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,62 @@ from transformers import TrainerCallback
 
 LOGGER = logging.getLogger("rlvr")
 ANSWER_PATTERN = re.compile(r"<answer>\s*(-?\d+)\s*</answer>", re.IGNORECASE | re.DOTALL)
+
+
+def configure_external_logs(show_external_logs: bool = False) -> None:
+    """Reduce noisy third-party logs so terminal output stays focused."""
+    if show_external_logs:
+        return
+
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r"The tokenizer has new PAD/BOS/EOS tokens.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Passing `generation_config` together with generation-related arguments.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Unable to fetch remote file due to the following error .*silently ignoring the lookup for the file config\.json.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Could not find a config file in .* - will assume that the vocabulary was not modified\.",
+    )
+
+    # Silence hub/http informational request logs.
+    for logger_name in (
+        "httpx",
+        "urllib3",
+        "huggingface_hub",
+        "huggingface_hub.file_download",
+        "huggingface_hub.utils._http",
+        "transformers",
+        "accelerate",
+        "wandb",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.ERROR)
+
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+        from huggingface_hub.utils import logging as hf_hub_logging
+
+        disable_progress_bars()
+        hf_hub_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+    try:
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_error()
+        transformers_logging.disable_progress_bar()
+    except Exception:
+        pass
 
 
 def _as_text(value: Any) -> str:
@@ -50,6 +108,8 @@ class EpisodeRewardLogger:
         terminal_log_every: int = 1,
         sample_log_every: int = 5,
         sample_chars: int = 160,
+        prediction_log_count: int = 1,
+        wandb_run: Any | None = None,
     ) -> None:
         self.log_path = log_path
         self.episode_id = 0
@@ -57,6 +117,8 @@ class EpisodeRewardLogger:
         self.terminal_log_every = max(1, terminal_log_every)
         self.sample_log_every = max(0, sample_log_every)
         self.sample_chars = max(40, sample_chars)
+        self.prediction_log_count = max(1, prediction_log_count)
+        self.wandb_run = wandb_run
         self.running_reward_sum = 0.0
         self.running_episode_count = 0
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +140,7 @@ class EpisodeRewardLogger:
         step = int(trainer_state.global_step) if trainer_state is not None else -1
         correct_count = 0
         format_count = 0
-        sample_record: dict[str, Any] | None = None
+        sample_records: list[dict[str, Any]] = []
 
         for prompt, completion, expected, q in zip(prompts, completions, answer, question, strict=True):
             completion_text = _as_text(completion)
@@ -94,13 +156,16 @@ class EpisodeRewardLogger:
             rewards.append(total_reward)
             correct_count += int(correct)
             format_count += int(format_ok)
-            if sample_record is None:
-                sample_record = {
-                    "question": q,
-                    "expected_answer": expected,
-                    "predicted_answer": predicted,
-                    "completion": completion_text,
-                }
+            if len(sample_records) < self.prediction_log_count:
+                sample_records.append(
+                    {
+                        "question": q,
+                        "expected_answer": expected,
+                        "predicted_answer": predicted,
+                        "completion": completion_text,
+                        "reward": total_reward,
+                    }
+                )
 
             log_record = {
                 "episode_id": self.episode_id,
@@ -146,15 +211,40 @@ class EpisodeRewardLogger:
                     format_rate * 100.0,
                     running_reward,
                 )
-                if self.sample_log_every > 0 and (logical_step + 1) % self.sample_log_every == 0 and sample_record:
-                    LOGGER.info(
-                        "sample step=%s | q=%s | expected=%s predicted=%s | completion=%s",
-                        step,
-                        sample_record["question"],
-                        sample_record["expected_answer"],
-                        sample_record["predicted_answer"],
-                        _clip_text(str(sample_record["completion"]), self.sample_chars),
-                    )
+                if self.sample_log_every > 0 and (logical_step + 1) % self.sample_log_every == 0:
+                    for idx, record in enumerate(sample_records):
+                        LOGGER.info(
+                            (
+                                "prediction step=%s idx=%s | reward=%.3f | expected=%s predicted=%s "
+                                "| text=%s"
+                            ),
+                            step,
+                            idx,
+                            float(record["reward"]),
+                            record["expected_answer"],
+                            record["predicted_answer"],
+                            _clip_text(str(record["completion"]), self.sample_chars),
+                        )
+
+            if self.wandb_run is not None:
+                wandb_step = logical_step + 1
+                payload: dict[str, Any] = {
+                    "episode/reward_mean": reward_mean,
+                    "episode/reward_min": reward_min,
+                    "episode/reward_max": reward_max,
+                    "episode/accuracy": accuracy,
+                    "episode/format_rate": format_rate,
+                    "episode/running_reward": running_reward,
+                }
+                if sample_records:
+                    payload["episode/prediction_text"] = _clip_text(str(sample_records[0]["completion"]), self.sample_chars)
+                    payload["episode/prediction_reward"] = float(sample_records[0]["reward"])
+                    payload["episode/predicted_answer"] = str(sample_records[0]["predicted_answer"])
+                    payload["episode/expected_answer"] = str(sample_records[0]["expected_answer"])
+                try:
+                    self.wandb_run.log(payload, step=wandb_step)
+                except Exception:
+                    pass
 
         return rewards
 
