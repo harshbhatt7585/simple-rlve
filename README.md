@@ -35,6 +35,8 @@ python train.py \
   --max_steps 60
 ```
 
+If outputs drift from strict format, try a lower sampling temperature, for example: `--temperature 0.7`.
+
 For `meta-llama/Llama-3.2-1B-Instruct`, make sure your Hugging Face account has accepted the model license and your environment is authenticated (`huggingface-cli login`).
 
 ### CPU-only run (slow, but useful for debugging)

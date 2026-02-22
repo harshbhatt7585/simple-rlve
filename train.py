@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max_completion_length", type=int, default=96)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--save_steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_cpu", action="store_true", help="Force CPU training.")
@@ -284,6 +285,8 @@ def main() -> None:
         dtype = torch.bfloat16
     elif use_fp16:
         dtype = torch.float16
+    if args.temperature <= 0:
+        raise ValueError("--temperature must be > 0")
 
     reward_fn = EpisodeRewardLogger(
         episodes_log_path,
@@ -318,6 +321,7 @@ def main() -> None:
         fp16=use_fp16,
         num_generations=args.num_generations,
         max_completion_length=args.max_completion_length,
+        temperature=args.temperature,
         model_init_kwargs={"torch_dtype": dtype},
         log_completions=False,
     )
@@ -347,12 +351,13 @@ def main() -> None:
     LOGGER.info(
         (
             "logging config | terminal_log_every=%s | sample_log_every=%s | sample_chars=%s | prediction_log_count=%s "
-            "| episodes_log=%s | metrics_log=%s"
+            "| temperature=%s | episodes_log=%s | metrics_log=%s"
         ),
         args.terminal_log_every,
         args.sample_log_every,
         args.sample_chars,
         args.prediction_log_count,
+        args.temperature,
         episodes_log_path,
         metrics_log_path,
     )

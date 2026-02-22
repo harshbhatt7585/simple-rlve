@@ -15,6 +15,10 @@ from transformers import TrainerCallback
 
 LOGGER = logging.getLogger("rlvr")
 ANSWER_PATTERN = re.compile(r"<answer>\s*(-?\d+)\s*</answer>", re.IGNORECASE | re.DOTALL)
+ANSWER_FALLBACK_PATTERNS = (
+    re.compile(r"\bfinal answer\s*[:=]\s*(-?\d[\d,]*)\b", re.IGNORECASE),
+    re.compile(r"\banswer\s*[:=]\s*(-?\d[\d,]*)\b", re.IGNORECASE),
+)
 
 
 def configure_external_logs(show_external_logs: bool = False) -> None:
@@ -87,9 +91,17 @@ def _as_text(value: Any) -> str:
 
 def _extract_answer(text: str) -> str | None:
     match = ANSWER_PATTERN.search(text)
-    if not match:
-        return None
-    return match.group(1).strip()
+    if match:
+        return match.group(1).strip()
+
+    for pattern in ANSWER_FALLBACK_PATTERNS:
+        matches = pattern.findall(text)
+        if not matches:
+            continue
+        candidate = matches[-1].replace(",", "").strip()
+        if re.fullmatch(r"-?\d+", candidate):
+            return candidate
+    return None
 
 
 def _clip_text(text: str, max_chars: int) -> str:
