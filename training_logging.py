@@ -211,14 +211,12 @@ class EpisodeRewardLogger:
                     running_reward,
                 )
                 if self.sample_log_every > 0 and (logical_step + 1) % self.sample_log_every == 0:
-                    for idx, record in enumerate(sample_records):
+                    for record in sample_records:
                         LOGGER.info(
                             (
-                                "prediction step=%s idx=%s | reward=%.3f | expected=%s predicted=%s "
+                                "prediction | reward=%.3f | expected=%s predicted=%s "
                                 "| text=%s"
                             ),
-                            step,
-                            idx,
                             float(record["reward"]),
                             record["expected_answer"],
                             record["predicted_answer"],
