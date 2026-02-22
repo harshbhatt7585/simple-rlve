@@ -38,10 +38,23 @@ from training_logging import EpisodeRewardLogger, MetricsJSONLCallback, configur
 LOGGER = logging.getLogger("rlvr")
 
 
+def setup_rlvr_logger(spaced_logs: bool = True) -> None:
+    """Configure rlvr logger with optional blank-line spacing between records."""
+    LOGGER.handlers.clear()
+    LOGGER.propagate = False
+    LOGGER.setLevel(logging.INFO)
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    if spaced_logs:
+        handler.terminator = "\n\n"
+    LOGGER.addHandler(handler)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Minimal RLVR training with a 1B model.")
-    parser.add_argument("--model_name", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-    parser.add_argument("--output_dir", type=str, default="rlvr_outputs/tinyllama_rlvr")
+    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
+    parser.add_argument("--output_dir", type=str, default="rlvr_outputs/llama32_1b_instruct_rlvr")
     parser.add_argument("--num_episodes", type=int, default=256)
     parser.add_argument("--max_steps", type=int, default=60)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1)
@@ -195,7 +208,7 @@ def main() -> None:
         level=logging.WARNING,
         format="%(message)s",
     )
-    LOGGER.setLevel(logging.INFO)
+    setup_rlvr_logger(spaced_logs=True)
     configure_external_logs(show_external_logs=args.show_external_logs)
 
     random.seed(args.seed)
@@ -251,7 +264,11 @@ def main() -> None:
         tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     except OSError as exc:
         raise RuntimeError(
-            "Failed to load tokenizer/model config. Use a valid local model path or enable internet access."
+            (
+                "Failed to load tokenizer/model config. Use a valid local model path, enable internet access, "
+                "and for gated models (for example meta-llama) ensure Hugging Face access is granted and "
+                "authentication is configured."
+            )
         ) from exc
 
     if tokenizer.pad_token is None:

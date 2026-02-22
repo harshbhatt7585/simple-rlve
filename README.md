@@ -1,8 +1,8 @@
-# Minimal RLVR (1B Model) Example
+# Minimal RLVR (1B Instruct Model) Example
 
 This is a smallest-practical RLVR pipeline for learning research:
 
-- **Model**: `TinyLlama/TinyLlama-1.1B-Chat-v1.0` (1B-class)
+- **Model**: `meta-llama/Llama-3.2-1B-Instruct` (1B-class)
 - **Environment**: generated arithmetic reasoning tasks
 - **Trainer**: Hugging Face TRL `GRPOTrainer`
 - **Reward**: verifiable correctness + output format bonus
@@ -29,11 +29,13 @@ source .venv/bin/activate
 
 ```bash
 python train.py \
-  --model_name TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-  --output_dir rlvr_outputs/tinyllama_rlvr \
+  --model_name meta-llama/Llama-3.2-1B-Instruct \
+  --output_dir rlvr_outputs/llama32_1b_instruct_rlvr \
   --num_episodes 256 \
   --max_steps 60
 ```
+
+For `meta-llama/Llama-3.2-1B-Instruct`, make sure your Hugging Face account has accepted the model license and your environment is authenticated (`huggingface-cli login`).
 
 ### CPU-only run (slow, but useful for debugging)
 
@@ -74,7 +76,7 @@ python train.py --show_external_logs
 python train.py \
   --use_wandb \
   --wandb_project rlvr-simple \
-  --wandb_run_name tinyllama-rlvr-run1
+  --wandb_run_name llama32-1b-instruct-rlvr-run1
 ```
 
 Offline W&B mode:
