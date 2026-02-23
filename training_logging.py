@@ -126,7 +126,7 @@ class EpisodeRewardLogger:
         self.log_path = log_path
         self.episode_id = 0
         self.__name__ = "episode_reward"
-        self.terminal_log_every = max(1, terminal_log_every)
+        self.terminal_log_every = max(0, terminal_log_every)
         self.sample_log_every = max(0, sample_log_every)
         self.sample_chars = max(40, sample_chars)
         self.prediction_log_count = max(1, prediction_log_count)
@@ -206,7 +206,7 @@ class EpisodeRewardLogger:
             self.running_episode_count += batch_size
 
             logical_step = max(step, 0)
-            if (logical_step + 1) % self.terminal_log_every == 0:
+            if self.terminal_log_every > 0 and (logical_step + 1) % self.terminal_log_every == 0:
                 LOGGER.info(
                     (
                         "episode_stats step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
@@ -262,7 +262,7 @@ class MetricsJSONLCallback(TrainerCallback):
     def __init__(self, path: Path, max_steps: int, terminal_log_every: int = 1) -> None:
         self.path = path
         self.max_steps = max_steps
-        self.terminal_log_every = max(1, terminal_log_every)
+        self.terminal_log_every = max(0, terminal_log_every)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text("")
 
@@ -281,7 +281,9 @@ class MetricsJSONLCallback(TrainerCallback):
 
         step = int(payload["global_step"])
         logical_step = max(step, 1)
-        should_log = (logical_step % self.terminal_log_every == 0) or ("train_runtime" in payload)
+        should_log = ("train_runtime" in payload) or (
+            self.terminal_log_every > 0 and logical_step % self.terminal_log_every == 0
+        )
         if not should_log:
             return
 
