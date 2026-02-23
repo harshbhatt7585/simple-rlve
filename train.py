@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--per_device_train_batch_size", type=int, default=1)
     p.add_argument("--gradient_accumulation_steps", type=int, default=2)
     p.add_argument("--num_generations", type=int, default=2)
-    p.add_argument("--max_completion_length", type=int, default=32)
+    p.add_argument("--max_completion_length", type=int, default=256)
     p.add_argument("--learning_rate", type=float, default=1e-5)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--beta", type=float, default=0.0)
