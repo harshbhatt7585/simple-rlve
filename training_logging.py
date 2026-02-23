@@ -198,12 +198,13 @@ class EpisodeRewardLogger:
 
         if rewards:
             batch_size = len(rewards)
-            reward_mean = sum(rewards) / batch_size
+            batch_reward_sum = sum(rewards)
+            reward_mean = batch_reward_sum / batch_size
             reward_min = min(rewards)
             reward_max = max(rewards)
             accuracy = correct_count / batch_size
             format_rate = format_count / batch_size
-            self.running_reward_sum += sum(rewards)
+            self.running_reward_sum += batch_reward_sum
             self.running_episode_count += batch_size
             running_reward = self.running_reward_sum / self.running_episode_count
 
@@ -239,11 +240,15 @@ class EpisodeRewardLogger:
                 wandb_step = logical_step + 1
                 payload: dict[str, Any] = {
                     "episode/reward_mean": reward_mean,
+                    "episode/reward_sum": batch_reward_sum,
                     "episode/reward_min": reward_min,
                     "episode/reward_max": reward_max,
                     "episode/accuracy": accuracy,
                     "episode/format_rate": format_rate,
+                    "episode/return": self.running_reward_sum,
+                    "episode/episodes_seen": self.running_episode_count,
                     "episode/running_reward": running_reward,
+                    "return": self.running_reward_sum,
                 }
                 if sample_records:
                     payload["episode/prediction_text"] = _clip_text(str(sample_records[0]["completion"]), self.sample_chars)
