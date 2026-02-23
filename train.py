@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--save_steps", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--terminal_log_every", type=int, default=0)
+    p.add_argument("--terminal_log_every", type=int, default=1)
     p.add_argument("--sample_log_every", type=int, default=0)
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--vllm_mode", default="colocate", choices=["server", "colocate"])
