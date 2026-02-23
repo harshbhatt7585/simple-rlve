@@ -57,6 +57,18 @@ from training_logging import EpisodeRewardLogger, MetricsJSONLCallback, configur
 
 LOGGER = logging.getLogger("rlvr")
 WANDB_PROJECT = "RLVR"
+LOW_VRAM_THRESHOLD_GIB = 16.5
+LOW_VRAM_PRESET = {
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 2,
+    "num_generations": 2,
+    "max_completion_length": 64,
+    "steps_per_generation": 1,
+    "num_iterations": 1,
+    "beta": 0.0,
+    "vllm_gpu_memory_utilization": 0.55,
+    "vllm_enable_sleep_mode": True,
+}
 
 
 def setup_rlvr_logger(spaced_logs: bool = True) -> None:
@@ -79,15 +91,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_episodes", type=int, default=256)
     parser.add_argument("--max_steps", type=int, default=60)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
-    parser.add_argument("--num_generations", type=int, default=4)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
+    parser.add_argument("--num_generations", type=int, default=2)
     parser.add_argument(
         "--max_prompt_length",
         type=int,
         default=128,
         help="Reserved for compatibility across TRL versions (not used in trl==0.28.0).",
     )
-    parser.add_argument("--max_completion_length", type=int, default=96)
+    parser.add_argument("--max_completion_length", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument(
@@ -105,18 +117,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vllm_gpu_memory_utilization",
         type=float,
-        default=0.95,
+        default=0.55,
         help="Fraction of GPU memory reserved for vLLM cache/model (0, 1].",
     )
     parser.add_argument(
         "--vllm_enable_sleep_mode",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Enable vLLM sleep mode to reduce memory pressure between generation bursts.",
     )
     parser.add_argument(
         "--steps_per_generation",
         type=int,
-        default=None,
+        default=1,
         help="Number of optimization steps to run before triggering a fresh generation pass.",
     )
     parser.add_argument(
@@ -151,13 +164,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--terminal_log_every",
         type=int,
-        default=1,
-        help="Print compact terminal summaries every N training steps.",
+        default=0,
+        help="Print compact terminal summaries every N training steps (0 disables terminal logs).",
     )
     parser.add_argument(
         "--sample_log_every",
         type=int,
-        default=1,
+        default=0,
         help="Print one sampled completion every N training steps (0 disables sample logs).",
     )
     parser.add_argument(
@@ -274,6 +287,62 @@ def can_use_local_sockets() -> bool:
         return False
 
 
+def _get_gpu_total_memory_gib() -> float | None:
+    if not torch.cuda.is_available():
+        return None
+    device_index = torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device_index)
+    return props.total_memory / (1024**3)
+
+
+def _apply_low_vram_preset(args: argparse.Namespace, use_cpu: bool) -> float | None:
+    """Apply a conservative 16GB profile so training is stable on small GPUs."""
+    gpu_total_memory_gib = _get_gpu_total_memory_gib()
+    if use_cpu or gpu_total_memory_gib is None or gpu_total_memory_gib > LOW_VRAM_THRESHOLD_GIB:
+        return gpu_total_memory_gib
+
+    args.per_device_train_batch_size = LOW_VRAM_PRESET["per_device_train_batch_size"]
+    args.gradient_accumulation_steps = LOW_VRAM_PRESET["gradient_accumulation_steps"]
+    args.num_generations = LOW_VRAM_PRESET["num_generations"]
+    args.max_completion_length = min(args.max_completion_length, LOW_VRAM_PRESET["max_completion_length"])
+    args.steps_per_generation = LOW_VRAM_PRESET["steps_per_generation"]
+    args.num_iterations = LOW_VRAM_PRESET["num_iterations"]
+    args.beta = LOW_VRAM_PRESET["beta"]
+
+    if args.use_vllm:
+        args.vllm_gpu_memory_utilization = min(
+            args.vllm_gpu_memory_utilization,
+            LOW_VRAM_PRESET["vllm_gpu_memory_utilization"],
+        )
+        args.vllm_enable_sleep_mode = bool(LOW_VRAM_PRESET["vllm_enable_sleep_mode"])
+        major, _minor = torch.cuda.get_device_capability()
+        if major < 8:
+            os.environ.setdefault("VLLM_ATTENTION_BACKEND", "XFORMERS")
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    return gpu_total_memory_gib
+
+
+def _enforce_generation_divisibility(args: argparse.Namespace) -> None:
+    world_size = max(1, int(os.environ.get("WORLD_SIZE", "1")))
+    generation_batch_size = (
+        args.per_device_train_batch_size * args.gradient_accumulation_steps * world_size
+    )
+    if generation_batch_size % args.num_generations == 0:
+        return
+
+    if generation_batch_size % 2 == 0:
+        adjusted_num_generations = 2
+    else:
+        adjusted_num_generations = 1
+    LOGGER.warning(
+        "Adjusted num_generations from %s to %s so it divides generation_batch_size=%s.",
+        args.num_generations,
+        adjusted_num_generations,
+        generation_batch_size,
+    )
+    args.num_generations = adjusted_num_generations
+
+
 def main() -> None:
     args = parse_args()
 
@@ -289,14 +358,6 @@ def main() -> None:
 
     if args.temperature <= 0:
         raise ValueError("--temperature must be > 0")
-    if args.vllm_gpu_memory_utilization <= 0 or args.vllm_gpu_memory_utilization > 1:
-        raise ValueError("--vllm_gpu_memory_utilization must be in (0, 1].")
-    if args.steps_per_generation is not None and args.steps_per_generation <= 0:
-        raise ValueError("--steps_per_generation must be > 0 when provided.")
-    if args.num_iterations <= 0:
-        raise ValueError("--num_iterations must be > 0.")
-    if args.beta < 0:
-        raise ValueError("--beta must be >= 0.")
 
     use_cpu = args.use_cpu or not torch.cuda.is_available()
     if args.use_vllm and use_cpu:
@@ -308,6 +369,19 @@ def main() -> None:
             raise ImportError("--use_vllm requested but vllm is not installed. Install with: pip install vllm") from exc
     if args.use_vllm and args.unsloth_vllm_standby:
         os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
+
+    gpu_total_memory_gib = _apply_low_vram_preset(args, use_cpu=use_cpu)
+    _enforce_generation_divisibility(args)
+
+    if args.vllm_gpu_memory_utilization <= 0 or args.vllm_gpu_memory_utilization > 1:
+        raise ValueError("--vllm_gpu_memory_utilization must be in (0, 1].")
+    if args.steps_per_generation is not None and args.steps_per_generation <= 0:
+        raise ValueError("--steps_per_generation must be > 0 when provided.")
+    if args.num_iterations <= 0:
+        raise ValueError("--num_iterations must be > 0.")
+    if args.beta < 0:
+        raise ValueError("--beta must be >= 0.")
+
     has_cuda = not use_cpu and torch.cuda.is_available()
     use_bf16 = bool(has_cuda and torch.cuda.is_bf16_supported())
     use_fp16 = bool(has_cuda and not use_bf16)
@@ -444,8 +518,21 @@ def main() -> None:
         use_fp16,
         not args.disable_lora,
     )
+    if gpu_total_memory_gib is not None:
+        LOGGER.info("GPU memory detected: %.2f GiB", gpu_total_memory_gib)
     if not args.show_external_logs:
         LOGGER.info("external logs: suppressed (use --show_external_logs to enable)")
+    LOGGER.info(
+        (
+            "effective train config | batch=%s | grad_accum=%s | num_generations=%s "
+            "| max_completion_length=%s | steps_per_generation=%s"
+        ),
+        args.per_device_train_batch_size,
+        args.gradient_accumulation_steps,
+        args.num_generations,
+        args.max_completion_length,
+        args.steps_per_generation,
+    )
     LOGGER.info(
         (
             "logging config | terminal_log_every=%s | sample_log_every=%s | sample_chars=%s | prediction_log_count=%s "
