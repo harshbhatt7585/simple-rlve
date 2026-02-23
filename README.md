@@ -56,17 +56,18 @@ python train.py \
   --num_episodes 256 \
   --max_steps 60 \
   --use_vllm \
-  --vllm_mode colocate \
-  --vllm_gpu_memory_utilization 0.95 \
-  --num_iterations 1 \
-  --beta 0.0 \
-  --steps_per_generation 4
+  --vllm_mode colocate
 ```
 
 Notes:
 - `--use_vllm` requires GPU (not CPU mode).
+- On GPUs around 16GB VRAM, the script auto-applies a conservative profile:
+  - batch `1`, grad-accum `2`, generations `2`
+  - completion length capped at `64`
+  - `vllm_gpu_memory_utilization` clamped to `0.55`
+  - `vllm_enable_sleep_mode=True`
 - `UNSLOTH_VLLM_STANDBY=1` is enabled by default when `--use_vllm` is on (disable with `--no-unsloth_vllm_standby`).
-- If you hit OOM, lower `--vllm_gpu_memory_utilization` (for example `0.85`).
+- If you still hit OOM, lower `--vllm_gpu_memory_utilization` further (for example `0.45`).
 
 ### Cleaner terminal logs
 
@@ -81,6 +82,8 @@ python train.py \
 This prints per-step:
 - reward summary
 - prediction lines with `reward`, `expected`, `predicted`, and completion text snippet
+
+Default is quiet (`--terminal_log_every 0 --sample_log_every 0`) while still writing JSONL logs.
 
 Default behavior hides noisy raw trainer dict logs. If you want them back:
 
