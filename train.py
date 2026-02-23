@@ -51,6 +51,15 @@ def parse_args() -> argparse.Namespace:
         default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
         help="Comma-separated module names for LoRA adapters.",
     )
+    p.add_argument("--load_in_4bit", action="store_true", help="Load the base model in 4-bit (bitsandbytes).")
+    p.add_argument("--bnb_4bit_quant_type", default="nf4", choices=["nf4", "fp4"])
+    p.add_argument("--bnb_4bit_use_double_quant", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument(
+        "--bnb_4bit_compute_dtype",
+        default="auto",
+        choices=["auto", "bfloat16", "float16", "float32"],
+        help="Compute dtype used by 4-bit kernels (auto picks bf16/fp16/fp32 from hardware).",
+    )
     p.add_argument("--save_steps", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--terminal_log_every", type=int, default=0)
@@ -118,6 +127,35 @@ def make_lora_config(args: argparse.Namespace):
     )
 
 
+def make_model_init_kwargs(args: argparse.Namespace, dtype: torch.dtype, use_cpu: bool) -> dict:
+    kwargs = {"torch_dtype": dtype}
+    if not args.load_in_4bit:
+        return kwargs
+    if use_cpu:
+        raise ValueError("--load_in_4bit requires CUDA; disable --use_cpu and run on a GPU.")
+    if args.disable_lora:
+        raise ValueError("--load_in_4bit currently requires LoRA adapters (do not pass --disable_lora).")
+    try:
+        from transformers import BitsAndBytesConfig
+    except ImportError as exc:
+        raise ImportError("--load_in_4bit requested but bitsandbytes support is unavailable.") from exc
+
+    compute_dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+    compute_dtype = compute_dtype_map.get(args.bnb_4bit_compute_dtype, dtype)
+    kwargs["quantization_config"] = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type=args.bnb_4bit_quant_type,
+        bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
+        bnb_4bit_compute_dtype=compute_dtype,
+    )
+    kwargs["device_map"] = "auto"
+    return kwargs
+
+
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -154,6 +192,8 @@ def main():
         terminal_log_every=args.terminal_log_every,
     )
 
+    model_init_kwargs = make_model_init_kwargs(args=args, dtype=dtype, use_cpu=use_cpu)
+
     grpo_args = GRPOConfig(
         output_dir=str(output_dir),
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -174,7 +214,7 @@ def main():
         temperature=args.temperature,
         beta=args.beta,
         use_vllm=args.use_vllm,
-        model_init_kwargs={"torch_dtype": dtype},
+        model_init_kwargs=model_init_kwargs,
         log_completions=False,
         vllm_mode=args.vllm_mode,
         vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
@@ -195,7 +235,13 @@ def main():
     trainer.remove_callback(ProgressCallback)
     trainer.remove_callback(PrinterCallback)
 
-    LOGGER.info("Starting training | cpu=%s bf16=%s lora=%s", use_cpu, use_bf16, not args.disable_lora)
+    LOGGER.info(
+        "Starting training | cpu=%s bf16=%s lora=%s 4bit=%s",
+        use_cpu,
+        use_bf16,
+        not args.disable_lora,
+        args.load_in_4bit,
+    )
     trainer.train()
 
     final_dir = output_dir / "final_model"
