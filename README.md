@@ -15,6 +15,8 @@ cd /teamspace/studios/this_studio/rlvr
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+# optional for faster rollout generation
+pip install vllm
 ```
 
 Or one command:
@@ -44,6 +46,27 @@ For `meta-llama/Llama-3.2-1B-Instruct`, make sure your Hugging Face account has 
 ```bash
 python train.py --use_cpu --max_steps 5 --num_episodes 32
 ```
+
+### Faster training profile (Unsloth-style settings)
+
+```bash
+python train.py \
+  --model_name meta-llama/Llama-3.2-1B-Instruct \
+  --output_dir rlvr_outputs/llama32_1b_instruct_rlvr_fast \
+  --num_episodes 256 \
+  --max_steps 60 \
+  --use_vllm \
+  --vllm_mode colocate \
+  --vllm_gpu_memory_utilization 0.95 \
+  --num_iterations 1 \
+  --beta 0.0 \
+  --steps_per_generation 4
+```
+
+Notes:
+- `--use_vllm` requires GPU (not CPU mode).
+- `UNSLOTH_VLLM_STANDBY=1` is enabled by default when `--use_vllm` is on (disable with `--no-unsloth_vllm_standby`).
+- If you hit OOM, lower `--vllm_gpu_memory_utilization` (for example `0.85`).
 
 ### Cleaner terminal logs
 

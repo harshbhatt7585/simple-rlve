@@ -13,6 +13,7 @@ import operator
 import os
 import random
 import socket
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,10 @@ warnings.filterwarnings(
     "ignore",
     message=r"Can't initialize NVML",
 )
+
+# Unsloth standby should be set before training stack imports when using vLLM.
+if "--use_vllm" in sys.argv and "--no-unsloth_vllm_standby" not in sys.argv:
+    os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
 
 import torch
 from datasets import Dataset
@@ -70,6 +75,58 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_completion_length", type=int, default=96)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--use_vllm",
+        action="store_true",
+        help="Use vLLM for generation to speed up rollout throughput (GPU only).",
+    )
+    parser.add_argument(
+        "--vllm_mode",
+        type=str,
+        default="server",
+        choices=["server", "colocate"],
+        help="vLLM backend mode used by TRL GRPO.",
+    )
+    parser.add_argument(
+        "--vllm_gpu_memory_utilization",
+        type=float,
+        default=0.95,
+        help="Fraction of GPU memory reserved for vLLM cache/model (0, 1].",
+    )
+    parser.add_argument(
+        "--vllm_enable_sleep_mode",
+        action="store_true",
+        help="Enable vLLM sleep mode to reduce memory pressure between generation bursts.",
+    )
+    parser.add_argument(
+        "--steps_per_generation",
+        type=int,
+        default=None,
+        help="Number of optimization steps to run before triggering a fresh generation pass.",
+    )
+    parser.add_argument(
+        "--num_iterations",
+        type=int,
+        default=1,
+        help="GRPO inner-loop iterations per generated batch. Keep at 1 for max speed.",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.0,
+        help="KL regularization coefficient. 0.0 avoids reference-model overhead.",
+    )
+    parser.add_argument(
+        "--mask_truncated_completions",
+        action="store_true",
+        help="Exclude truncated completions from loss computation.",
+    )
+    parser.add_argument(
+        "--unsloth_vllm_standby",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Set UNSLOTH_VLLM_STANDBY=1 when using vLLM.",
+    )
     parser.add_argument("--save_steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_cpu", action="store_true", help="Force CPU training.")
@@ -215,6 +272,36 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    if args.temperature <= 0:
+        raise ValueError("--temperature must be > 0")
+    if args.vllm_gpu_memory_utilization <= 0 or args.vllm_gpu_memory_utilization > 1:
+        raise ValueError("--vllm_gpu_memory_utilization must be in (0, 1].")
+    if args.steps_per_generation is not None and args.steps_per_generation <= 0:
+        raise ValueError("--steps_per_generation must be > 0 when provided.")
+    if args.num_iterations <= 0:
+        raise ValueError("--num_iterations must be > 0.")
+    if args.beta < 0:
+        raise ValueError("--beta must be >= 0.")
+
+    use_cpu = args.use_cpu or not torch.cuda.is_available()
+    if args.use_vllm and use_cpu:
+        raise ValueError("--use_vllm requires CUDA. Remove --use_cpu and run on a GPU.")
+    if args.use_vllm:
+        try:
+            import vllm  # noqa: F401
+        except ImportError as exc:
+            raise ImportError("--use_vllm requested but vllm is not installed. Install with: pip install vllm") from exc
+    if args.use_vllm and args.unsloth_vllm_standby:
+        os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
+    has_cuda = not use_cpu and torch.cuda.is_available()
+    use_bf16 = bool(has_cuda and torch.cuda.is_bf16_supported())
+    use_fp16 = bool(has_cuda and not use_bf16)
+    dtype = torch.float32
+    if use_bf16:
+        dtype = torch.bfloat16
+    elif use_fp16:
+        dtype = torch.float16
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     episodes_log_path = output_dir / args.episodes_log_name
@@ -276,18 +363,6 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    use_cpu = args.use_cpu or not torch.cuda.is_available()
-    has_cuda = not use_cpu and torch.cuda.is_available()
-    use_bf16 = bool(has_cuda and torch.cuda.is_bf16_supported())
-    use_fp16 = bool(has_cuda and not use_bf16)
-    dtype = torch.float32
-    if use_bf16:
-        dtype = torch.bfloat16
-    elif use_fp16:
-        dtype = torch.float16
-    if args.temperature <= 0:
-        raise ValueError("--temperature must be > 0")
-
     reward_fn = EpisodeRewardLogger(
         episodes_log_path,
         terminal_log_every=args.terminal_log_every,
@@ -322,6 +397,14 @@ def main() -> None:
         num_generations=args.num_generations,
         max_completion_length=args.max_completion_length,
         temperature=args.temperature,
+        steps_per_generation=args.steps_per_generation,
+        num_iterations=args.num_iterations,
+        beta=args.beta,
+        mask_truncated_completions=args.mask_truncated_completions,
+        use_vllm=args.use_vllm,
+        vllm_mode=args.vllm_mode,
+        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+        vllm_enable_sleep_mode=args.vllm_enable_sleep_mode,
         model_init_kwargs={"torch_dtype": dtype},
         log_completions=False,
     )
@@ -360,6 +443,21 @@ def main() -> None:
         args.temperature,
         episodes_log_path,
         metrics_log_path,
+    )
+    LOGGER.info(
+        (
+            "speed config | use_vllm=%s | vllm_mode=%s | vllm_gpu_mem_util=%.2f | vllm_sleep=%s | "
+            "unsloth_standby=%s | steps_per_generation=%s | num_iterations=%s | beta=%s | mask_truncated=%s"
+        ),
+        args.use_vllm,
+        args.vllm_mode,
+        args.vllm_gpu_memory_utilization,
+        args.vllm_enable_sleep_mode,
+        bool(args.use_vllm and args.unsloth_vllm_standby),
+        args.steps_per_generation,
+        args.num_iterations,
+        args.beta,
+        args.mask_truncated_completions,
     )
     trainer.train()
 
