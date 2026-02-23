@@ -131,7 +131,6 @@ class EpisodeRewardLogger:
         self.sample_chars = max(40, sample_chars)
         self.prediction_log_count = max(1, prediction_log_count)
         self.wandb_run = wandb_run
-        self.running_reward_sum = 0.0
         self.running_episode_count = 0
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_header()
@@ -204,16 +203,14 @@ class EpisodeRewardLogger:
             reward_max = max(rewards)
             accuracy = correct_count / batch_size
             format_rate = format_count / batch_size
-            self.running_reward_sum += batch_reward_sum
             self.running_episode_count += batch_size
-            running_reward = self.running_reward_sum / self.running_episode_count
 
             logical_step = max(step, 0)
             if (logical_step + 1) % self.terminal_log_every == 0:
                 LOGGER.info(
                     (
                         "episode_stats step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
-                        "| acc=%.1f%% | format=%.1f%% | running_reward=%.3f"
+                        "| acc=%.1f%% | format=%.1f%%"
                     ),
                     step,
                     reward_mean,
@@ -221,7 +218,6 @@ class EpisodeRewardLogger:
                     reward_max,
                     accuracy * 100.0,
                     format_rate * 100.0,
-                    running_reward,
                 )
                 if self.sample_log_every > 0 and (logical_step + 1) % self.sample_log_every == 0:
                     for record in sample_records:
@@ -245,10 +241,7 @@ class EpisodeRewardLogger:
                     "episode/reward_max": reward_max,
                     "episode/accuracy": accuracy,
                     "episode/format_rate": format_rate,
-                    "episode/return": self.running_reward_sum,
                     "episode/episodes_seen": self.running_episode_count,
-                    "episode/running_reward": running_reward,
-                    "return": self.running_reward_sum,
                 }
                 if sample_records:
                     payload["episode/prediction_text"] = _clip_text(str(sample_records[0]["completion"]), self.sample_chars)
