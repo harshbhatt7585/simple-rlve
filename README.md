@@ -16,7 +16,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 # optional for faster rollout generation
-pip install vllm
+pip install "vllm==0.12.0"
 ```
 
 Or one command:
