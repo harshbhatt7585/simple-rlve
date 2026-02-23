@@ -32,11 +32,26 @@ warnings.filterwarnings(
 if "--use_vllm" in sys.argv and "--no-unsloth_vllm_standby" not in sys.argv:
     os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
 
-import torch
-from datasets import Dataset
-from transformers import AutoTokenizer
-from transformers.trainer_callback import PrinterCallback, ProgressCallback
-from trl import GRPOConfig, GRPOTrainer
+
+def _raise_dependency_error(exc: Exception) -> None:
+    message = str(exc)
+    if "numpy.dtype size changed" in message or "multiarray failed to import" in message:
+        raise RuntimeError(
+            "Dependency import failed due to binary incompatibility (likely numpy/pandas/scipy/sklearn). "
+            "Recreate the environment and install from requirements.txt."
+        ) from exc
+    raise RuntimeError("Failed to import training dependencies.") from exc
+
+
+try:
+    import torch
+    from datasets import Dataset
+    from transformers import AutoTokenizer
+    from transformers.trainer_callback import PrinterCallback, ProgressCallback
+    from trl import GRPOConfig, GRPOTrainer
+except Exception as exc:
+    _raise_dependency_error(exc)
+
 
 from training_logging import EpisodeRewardLogger, MetricsJSONLCallback, configure_external_logs
 
