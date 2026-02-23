@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir", default="rlvr_outputs/run")
     p.add_argument("--num_episodes", type=int, default=256)
     p.add_argument("--max_steps", type=int, default=60)
-    p.add_argument("--per_device_train_batch_size", type=int, default=1)
+    p.add_argument("--per_device_train_batch_size", type=int, default=2)
     p.add_argument("--gradient_accumulation_steps", type=int, default=2)
     p.add_argument("--num_generations", type=int, default=2)
     p.add_argument("--max_completion_length", type=int, default=64)
@@ -42,6 +42,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use_vllm", action="store_true")
     p.add_argument("--use_cpu", action="store_true")
     p.add_argument("--disable_lora", action="store_true")
+    p.add_argument("--lora_r", type=int, default=16)
+    p.add_argument("--lora_alpha", type=int, default=32)
+    p.add_argument("--lora_dropout", type=float, default=0.05)
+    p.add_argument("--lora_bias", default="none", choices=["none", "all", "lora_only"])
+    p.add_argument(
+        "--lora_target_modules",
+        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        help="Comma-separated module names for LoRA adapters.",
+    )
     p.add_argument("--save_steps", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--terminal_log_every", type=int, default=0)
@@ -89,14 +98,23 @@ class ArithmeticEnv:
         return Dataset.from_list(rows)
 
 
-def make_lora_config(disable: bool):
-    if disable:
+def make_lora_config(args: argparse.Namespace):
+    if args.disable_lora:
         return None
-    from peft import LoraConfig
+    try:
+        from peft import LoraConfig
+    except ImportError as exc:
+        raise ImportError("LoRA requested but peft is not installed. Install with: pip install peft") from exc
+    target_modules = [m.strip() for m in args.lora_target_modules.split(",") if m.strip()]
+    if not target_modules:
+        raise ValueError("--lora_target_modules must contain at least one module name")
     return LoraConfig(
-        r=16, lora_alpha=32, lora_dropout=0.05, bias="none",
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        bias=args.lora_bias,
         task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=target_modules,
     )
 
 
@@ -163,8 +181,6 @@ def main():
         vllm_enable_sleep_mode=args.vllm_enable_sleep_mode,
         steps_per_generation=args.steps_per_generation,
         num_iterations=args.num_iterations,
-        vllm_server_kwargs={"max_model_len": 2048},
-
     )
 
     trainer = GRPOTrainer(
@@ -174,7 +190,7 @@ def main():
         train_dataset=train_dataset,
         processing_class=tokenizer,
         callbacks=[callback],
-        peft_config=make_lora_config(args.disable_lora),
+        peft_config=make_lora_config(args),
     )
     trainer.remove_callback(ProgressCallback)
     trainer.remove_callback(PrinterCallback)
