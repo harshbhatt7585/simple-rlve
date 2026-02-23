@@ -106,7 +106,7 @@ python train.py --wandb
 
 W&B is fixed to:
 - project: `RLVR`
-- run name: environment name (`arithmetic_reasoning`)
+- run name: environment name (`arithemetic_reasoning`)
 
 Offline W&B mode:
 

@@ -24,6 +24,7 @@ from trl import GRPOConfig, GRPOTrainer
 from training_logging import EpisodeRewardLogger, MetricsJSONLCallback, configure_external_logs
 
 LOGGER = logging.getLogger("rlvr")
+WANDB_PROJECT = "RLVR"
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,7 +113,7 @@ class Episode:
 
 class ArithmeticEnv:
     OPS = {"+": operator.add, "-": operator.sub, "*": operator.mul}
-    NAME = "arithmetic_reasoning"
+    NAME = "arithemetic_reasoning"
 
     def __init__(self, seed: int = 42):
         self.rng = random.Random(seed)
@@ -210,6 +211,8 @@ def main():
 
     env = ArithmeticEnv(seed=args.seed)
     train_dataset = env.build_dataset(args.num_episodes)
+    if args.wandb:
+        os.environ["WANDB_PROJECT"] = WANDB_PROJECT
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None:
@@ -238,6 +241,7 @@ def main():
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=2,
+        run_name=env.NAME,
         report_to="wandb" if args.wandb else "none",
         remove_unused_columns=False,
         use_cpu=use_cpu,
