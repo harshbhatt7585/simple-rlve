@@ -347,16 +347,9 @@ class DateNormalizationEnv:
 
     def _resolve_columns(self, split: Dataset) -> tuple[str, str]:
         columns = list(split.column_names)
-        text_candidates = ("input_text", "sentence", "text", "input", "prompt", "question")
-        answer_candidates = ("output_text", "date", "normalized_date", "target", "answer", "label")
 
-        text_col = next((name for name in text_candidates if name in columns), None)
-        answer_col = next((name for name in answer_candidates if name in columns and name != text_col), None)
-
-        if text_col is None and columns:
-            text_col = columns[0]
-        if answer_col is None:
-            answer_col = next((name for name in columns if name != text_col), None)
+        text_col = "input_text"
+        answer_col = "target_output"
 
         if text_col is None or answer_col is None:
             raise ValueError(f"Could not infer text/date columns from dataset columns: {columns}")
