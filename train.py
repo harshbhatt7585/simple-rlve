@@ -49,7 +49,6 @@ def parse_args() -> argparse.Namespace:
         help="Use vLLM for generation by default (can be disabled with --no-use_vllm).",
     )
     p.add_argument("--use_cpu", action="store_true")
-    p.add_argument("--disable_lora", action="store_true")
     p.add_argument("--lora_r", type=int, default=16)
     p.add_argument("--lora_alpha", type=int, default=32)
     p.add_argument("--lora_dropout", type=float, default=0.05)
@@ -158,13 +157,9 @@ def make_model_init_kwargs(args: argparse.Namespace, dtype: torch.dtype, use_cpu
         return kwargs
     if use_cpu:
         raise ValueError("--load_in_4bit requires CUDA; disable --use_cpu and run on a GPU.")
-    if args.disable_lora:
-        raise ValueError("--load_in_4bit currently requires LoRA adapters (do not pass --disable_lora).")
-    try:
-        from transformers import BitsAndBytesConfig
-    except ImportError as exc:
-        raise ImportError("--load_in_4bit requested but bitsandbytes support is unavailable.") from exc
 
+    from transformers import BitsAndBytesConfig
+    
     compute_dtype_map = {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
@@ -273,7 +268,6 @@ def main():
         "Starting training | cpu=%s bf16=%s lora=%s 4bit=%s",
         use_cpu,
         use_bf16,
-        not args.disable_lora,
         args.load_in_4bit,
     )
     trainer.train()
