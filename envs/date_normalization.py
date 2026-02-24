@@ -72,6 +72,7 @@ Return the output JSON object only, strictly in the following JSON format:
 }
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
+ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -207,6 +208,30 @@ def _extract_json_date(completion_text: str) -> tuple[bool, str | None]:
     return False, None
 
 
+def _extract_expected_date(value: Any) -> str | None:
+    """Extract expected date from dataset JSON as a strict single ISO date."""
+    raw = str(value).strip() if value is not None else ""
+    if not raw:
+        return None
+
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+
+    resolved_value: str | None = None
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+        resolved_value = str(parsed[0].get("resolved_value", "")).strip() or None
+    elif isinstance(parsed, dict):
+        resolved_value = str(parsed.get("resolved_value", "")).strip() or None
+
+    if resolved_value is None:
+        return None
+    if not ISO_DATE_PATTERN.fullmatch(resolved_value):
+        return None
+    return resolved_value
+
+
 class DateExtractionRewardLogger:
     """Reward function with dense scoring for JSON validity + answer correctness."""
 
@@ -248,22 +273,18 @@ class DateExtractionRewardLogger:
             expected_norm = _normalize_date(expected)
             json_valid, json_date_raw = _extract_json_date(completion_text)
 
-            predicted_norm = _normalize_date(json_date_raw) if json_valid else _normalize_date(completion_text)
+            predicted_norm = _normalize_date(json_date_raw) if json_valid else None
             is_correct = expected_norm is not None and predicted_norm == expected_norm
 
-            # Reward structure requested by user:
-            # 1) invalid JSON + wrong answer = -0.25
-            # 2) valid JSON + wrong answer = 0.0
-            # 3) invalid JSON + correct answer = 0.5
-            # 4) valid JSON + correct answer = 1.0
-            if json_valid and is_correct:
-                total_reward = 1.0
-            elif json_valid and not is_correct:
-                total_reward = 0.0
-            elif (not json_valid) and is_correct:
-                total_reward = 0.5
-            else:
+            # Strict JSON policy:
+            # 1) if JSON cannot be parsed, reward is always -0.25
+            # 2) if JSON parses, reward is 1.0 for correct date, else 0.0
+            if not json_valid:
                 total_reward = -0.25
+            elif is_correct:
+                total_reward = 1.0
+            else:
+                total_reward = 0.0
 
             rewards.append(total_reward)
             json_valid_count += int(json_valid)
@@ -386,7 +407,7 @@ class DateNormalizationEnv:
             if "type" in row and str(row["type"]).strip().lower() != "date":
                 continue
             question = str(row[text_col]).strip()
-            answer = _normalize_date(row[answer_col])
+            answer = _extract_expected_date(row[answer_col])
             if not question or answer is None:
                 continue
 
