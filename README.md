@@ -30,27 +30,27 @@ source .venv/bin/activate
 ## 2) Train
 
 ```bash
-python train.py \
+python envs/arithmetic.py \
   --model_name meta-llama/Llama-3.2-1B-Instruct \
   --output_dir rlvr_outputs/llama32_1b_instruct_rlvr \
   --num_episodes 256 \
   --max_steps 60
 ```
 
-If outputs drift from strict format, reduce `TEMPERATURE` in `train.py` (currently hardcoded).
+If outputs drift from strict format, reduce `TEMPERATURE` in `envs/arithmetic.py` (currently hardcoded).
 
 For `meta-llama/Llama-3.2-1B-Instruct`, make sure your Hugging Face account has accepted the model license and your environment is authenticated (`huggingface-cli login`).
 
 ### CPU-only run (slow, but useful for debugging)
 
 ```bash
-python train.py --device cpu --max_steps 5 --num_episodes 32
+python envs/arithmetic.py --device cpu --max_steps 5 --num_episodes 32
 ```
 
 ### Faster training profile (Unsloth-style settings)
 
 ```bash
-python train.py \
+python envs/arithmetic.py \
   --model_name meta-llama/Llama-3.2-1B-Instruct \
   --output_dir rlvr_outputs/llama32_1b_instruct_rlvr_fast \
   --num_episodes 256 \
@@ -59,12 +59,12 @@ python train.py \
 
 Notes:
 - vLLM is enabled by default when `--device cuda` is used.
-- vLLM settings are currently hardcoded in `train.py`:
+- vLLM settings are currently hardcoded in `envs/arithmetic.py`:
   - `vllm_mode="colocate"`
   - `vllm_gpu_memory_utilization=0.4`
   - `vllm_enable_sleep_mode=False`
   - `vllm_max_model_length=512`
-- Core GRPO hyperparameters are also hardcoded in `train.py`:
+- Core GRPO hyperparameters are also hardcoded in `envs/arithmetic.py`:
   - `per_device_train_batch_size=1`
   - `gradient_accumulation_steps=2`
   - `num_generations=2`
@@ -76,7 +76,7 @@ Notes:
 ### Cleaner terminal logs
 
 ```bash
-python train.py \
+python envs/arithmetic.py \
   --terminal_log_every 1 \
   --sample_log_every 1
 ```
@@ -90,7 +90,7 @@ Set either value to `0` to reduce terminal output.
 ### W&B logging
 
 ```bash
-python train.py --wandb
+python envs/arithmetic.py --wandb
 ```
 
 W&B is fixed to:
@@ -114,4 +114,4 @@ All outputs go under `--output_dir`:
 ## Notes
 
 - This is intentionally minimal for research learning.
-- LoRA is enabled with hardcoded defaults in `train.py` (`r=16`, `alpha=32`, `dropout=0.05`, `bias="none"`).
+- LoRA is enabled with hardcoded defaults in `envs/arithmetic.py` (`r=16`, `alpha=32`, `dropout=0.05`, `bias="none"`).

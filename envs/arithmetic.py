@@ -8,6 +8,7 @@ import logging
 import operator
 import os
 import random
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,10 @@ from datasets import Dataset
 from transformers import AutoTokenizer
 from transformers.trainer_callback import PrinterCallback, ProgressCallback
 from trl import GRPOConfig, GRPOTrainer
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from training_logging import EpisodeRewardLogger, MetricsJSONLCallback, configure_external_logs
 
