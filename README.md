@@ -127,5 +127,4 @@ All outputs go under `--output_dir`:
 ## Notes
 
 - This is intentionally minimal for research learning.
-- For low-memory GPUs, keep LoRA enabled (default).
-- If you want full fine-tuning instead of LoRA: add `--disable_lora` (requires more VRAM).
+- LoRA is enabled with hardcoded defaults in `train.py` (`r=16`, `alpha=32`, `dropout=0.05`, `bias="none"`).

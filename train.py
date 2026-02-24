@@ -31,6 +31,19 @@ VLLM_MODE = "colocate"
 VLLM_GPU_MEMORY_UTILIZATION = 0.4
 VLLM_ENABLE_SLEEP_MODE = False
 VLLM_MAX_MODEL_LENGTH = 512
+LORA_R = 16
+LORA_ALPHA = 32
+LORA_DROPOUT = 0.05
+LORA_BIAS = "none"
+LORA_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,15 +65,6 @@ def parse_args() -> argparse.Namespace:
         default="cuda",
         choices=["cuda", "cpu"],
         help="Execution device (defaults to cuda).",
-    )
-    p.add_argument("--lora_r", type=int, default=16)
-    p.add_argument("--lora_alpha", type=int, default=32)
-    p.add_argument("--lora_dropout", type=float, default=0.05)
-    p.add_argument("--lora_bias", default="none", choices=["none", "all", "lora_only"])
-    p.add_argument(
-        "--lora_target_modules",
-        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
-        help="Comma-separated module names for LoRA adapters.",
     )
     p.add_argument("--load_in_4bit", action="store_true", help="Load the base model in 4-bit (bitsandbytes).")
     p.add_argument("--bnb_4bit_quant_type", default="nf4", choices=["nf4", "fp4"])
@@ -120,17 +124,16 @@ class ArithmeticEnv:
         return Dataset.from_list(rows)
 
 
-def make_lora_config(args: argparse.Namespace):
-    target_modules = [m.strip() for m in args.lora_target_modules.split(",") if m.strip()]
-    if not target_modules:
-        raise ValueError("--lora_target_modules must contain at least one module name")
+def make_lora_config():
+    if not LORA_TARGET_MODULES:
+        raise ValueError("LORA_TARGET_MODULES must contain at least one module name")
     return LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        bias=args.lora_bias,
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
+        bias=LORA_BIAS,
         task_type="CAUSAL_LM",
-        target_modules=target_modules,
+        target_modules=list(LORA_TARGET_MODULES),
     )
 
 
@@ -248,7 +251,7 @@ def main():
         train_dataset=train_dataset,
         processing_class=tokenizer,
         callbacks=[callback],
-        peft_config=make_lora_config(args),
+        peft_config=make_lora_config(),
     )
     trainer.remove_callback(ProgressCallback)
     trainer.remove_callback(PrinterCallback)
