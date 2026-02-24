@@ -345,19 +345,10 @@ class DateNormalizationEnv:
                 return dataset[split_name]
         return next(iter(dataset.values()))
 
-    def _resolve_columns(self, split: Dataset) -> tuple[str, str]:
-        columns = list(split.column_names)
-
-        text_col = "input_text"
-        answer_col = "target_output"
-
-        if text_col is None or answer_col is None:
-            raise ValueError(f"Could not infer text/date columns from dataset columns: {columns}")
-        return text_col, answer_col
 
     def build_dataset(self, n: int) -> Dataset:
         split = self._load_split()
-        text_col, answer_col = self._resolve_columns(split)
+        text_col, answer_col = ("input_text", "target_output")
         total = len(split)
         if total == 0:
             raise ValueError("Loaded dataset split is empty.")
