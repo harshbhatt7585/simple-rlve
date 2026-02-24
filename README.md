@@ -54,20 +54,16 @@ python train.py \
   --model_name meta-llama/Llama-3.2-1B-Instruct \
   --output_dir rlvr_outputs/llama32_1b_instruct_rlvr_fast \
   --num_episodes 256 \
-  --max_steps 60 \
-  --use_vllm \
-  --vllm_mode colocate
+  --max_steps 60
 ```
 
 Notes:
-- `--use_vllm` requires GPU (`--device cuda`).
-- On GPUs around 16GB VRAM, the script auto-applies a conservative profile:
-  - batch `1`, grad-accum `2`, generations `2`
-  - completion length capped at `64`
-  - `vllm_gpu_memory_utilization` clamped to `0.55`
-  - `vllm_enable_sleep_mode=True`
-- `UNSLOTH_VLLM_STANDBY=1` is enabled by default when `--use_vllm` is on (disable with `--no-unsloth_vllm_standby`).
-- If you still hit OOM, lower `--vllm_gpu_memory_utilization` further (for example `0.45`).
+- vLLM is enabled by default when `--device cuda` is used.
+- vLLM settings are currently hardcoded in `train.py`:
+  - `vllm_mode="colocate"`
+  - `vllm_gpu_memory_utilization=0.4`
+  - `vllm_enable_sleep_mode=False`
+  - `vllm_max_model_length=512`
 
 ### Cleaner terminal logs
 

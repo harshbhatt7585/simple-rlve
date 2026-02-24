@@ -26,6 +26,11 @@ from training_logging import EpisodeRewardLogger, MetricsJSONLCallback, configur
 
 LOGGER = logging.getLogger("rlvr")
 WANDB_PROJECT = "RLVR"
+USE_VLLM = True
+VLLM_MODE = "colocate"
+VLLM_GPU_MEMORY_UTILIZATION = 0.4
+VLLM_ENABLE_SLEEP_MODE = False
+VLLM_MAX_MODEL_LENGTH = 512
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,12 +47,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--learning_rate", type=float, default=1e-5)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--beta", type=float, default=0.0)
-    p.add_argument(
-        "--use_vllm",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use vLLM for generation by default (can be disabled with --no-use_vllm).",
-    )
     p.add_argument(
         "--device",
         default="cuda",
@@ -77,27 +76,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--terminal_log_every", type=int, default=1)
     p.add_argument("--sample_log_every", type=int, default=1)
     p.add_argument("--wandb", action="store_true")
-    p.add_argument("--vllm_mode", default="colocate", choices=["server", "colocate"])
-    p.add_argument(
-        "--vllm_gpu_memory_utilization",
-        type=float,
-        default=0.4,
-        help="GPU memory fraction reserved for vLLM in colocate mode.",
-    )
-    p.add_argument(
-        "--vllm_enable_sleep_mode",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="vLLM sleep mode is disabled by default to avoid CUDA illegal-memory issues on some GPUs "
-        "(equivalent to passing --no-vllm_enable_sleep_mode).",
-    )
-    p.add_argument(
-        "--vllm_max_model_length",
-        type=int,
-        default=512,
-        help="Maximum total sequence length (prompt + completion) used by vLLM. "
-        "Smaller values reduce KV cache memory usage; must be >= max prompt length + max_completion_length.",
-    )
     p.add_argument("--num_iterations", type=int, default=1)
     p.add_argument(
         "--steps_per_generation",
@@ -200,10 +178,12 @@ def main():
     use_fp16 = has_cuda and not use_bf16
     dtype = torch.bfloat16 if use_bf16 else (torch.float16 if use_fp16 else torch.float32)
 
+    use_vllm = USE_VLLM
+
     # vLLM currently requires CUDA; if we are on CPU, silently disable it to avoid confusing errors.
-    if use_cpu and args.use_vllm:
+    if use_cpu and use_vllm:
         LOGGER.warning("Disabling vLLM because --device is set to cpu.")
-        args.use_vllm = False
+        use_vllm = False
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -250,13 +230,13 @@ def main():
         max_completion_length=args.max_completion_length,
         temperature=args.temperature,
         beta=args.beta,
-        use_vllm=args.use_vllm,
+        use_vllm=use_vllm,
         model_init_kwargs=model_init_kwargs,
         log_completions=False,
-        vllm_mode=args.vllm_mode,
-        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-        vllm_enable_sleep_mode=args.vllm_enable_sleep_mode,
-        vllm_max_model_length=args.vllm_max_model_length,
+        vllm_mode=VLLM_MODE,
+        vllm_gpu_memory_utilization=VLLM_GPU_MEMORY_UTILIZATION,
+        vllm_enable_sleep_mode=VLLM_ENABLE_SLEEP_MODE,
+        vllm_max_model_length=VLLM_MAX_MODEL_LENGTH,
         steps_per_generation=args.steps_per_generation,
         num_iterations=args.num_iterations,
     )
