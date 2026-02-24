@@ -66,7 +66,7 @@ DATASET_CACHE_DIR = PROJECT_ROOT / ".hf_datasets_cache"
 PROMPT_TEMPLATE = """You are given a sentence that may contain a date.
 Identify the date mentioned in the sentence and extract it in the format DD-MM-YY.
 
-Return the output strictly in the following JSON format:
+Return the output JSON object only, strictly in the following JSON format:
 {
   "date": "DD-MM-YY"
 }
