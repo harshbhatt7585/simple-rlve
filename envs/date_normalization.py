@@ -84,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--device",
         default="cuda",
-        choices=["cuda", "cpu", "mps"],
+        choices=["cuda", "cpu"],
         help="Execution device (defaults to cuda).",
     )
     p.add_argument("--load_in_4bit", action="store_true", help="Load the base model in 4-bit (bitsandbytes).")
@@ -469,25 +469,19 @@ def main():
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
     if args.device == "cuda" and not torch.cuda.is_available():
-        fallback = "mps" if mps_available else "cpu"
-        LOGGER.warning("CUDA requested via --device cuda but unavailable; falling back to %s.", fallback)
-        args.device = fallback
-    if args.device == "mps" and not mps_available:
-        LOGGER.warning("MPS requested via --device mps but unavailable; falling back to CPU.")
+        LOGGER.warning("CUDA requested via --device cuda but no CUDA device is available; falling back to CPU.")
         args.device = "cpu"
 
     has_cuda = args.device == "cuda"
-    use_mps = args.device == "mps"
-    use_cpu = args.device == "cpu"
+    use_cpu = not has_cuda
     use_bf16 = has_cuda and torch.cuda.is_bf16_supported()
     use_fp16 = has_cuda and not use_bf16
     dtype = torch.bfloat16 if use_bf16 else (torch.float16 if use_fp16 else torch.float32)
 
     use_vllm = USE_VLLM
-    if args.device != "cuda" and use_vllm:
-        LOGGER.warning("Disabling vLLM because --device is set to %s.", args.device)
+    if use_cpu and use_vllm:
+        LOGGER.warning("Disabling vLLM because --device is set to cpu.")
         use_vllm = False
 
     output_dir = Path(args.output_dir)
@@ -515,7 +509,7 @@ def main():
 
     model_init_kwargs = make_model_init_kwargs(args=args, dtype=dtype, device=args.device)
 
-    grpo_args = GRPOConfig(
+    grpo_kwargs = dict(
         output_dir=str(output_dir),
         per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
@@ -529,7 +523,6 @@ def main():
         report_to="wandb" if args.wandb else "none",
         remove_unused_columns=False,
         use_cpu=use_cpu,
-        use_mps_device=use_mps,
         bf16=use_bf16,
         fp16=use_fp16,
         num_generations=NUM_GENERATIONS,
@@ -546,6 +539,7 @@ def main():
         steps_per_generation=STEPS_PER_GENERATION,
         num_iterations=NUM_ITERATIONS,
     )
+    grpo_args = GRPOConfig(**grpo_kwargs)
 
     trainer = GRPOTrainer(
         model=args.model_name,
