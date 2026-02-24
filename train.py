@@ -11,6 +11,7 @@ import random
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from peft import LoraConfig
 
 warnings.filterwarnings("ignore", message=r"CUDA initialization.*")
 warnings.filterwarnings("ignore", message=r"Can't initialize NVML")
@@ -138,12 +139,6 @@ class ArithmeticEnv:
 
 
 def make_lora_config(args: argparse.Namespace):
-    if args.disable_lora:
-        return None
-    try:
-        from peft import LoraConfig
-    except ImportError as exc:
-        raise ImportError("LoRA requested but peft is not installed. Install with: pip install peft") from exc
     target_modules = [m.strip() for m in args.lora_target_modules.split(",") if m.strip()]
     if not target_modules:
         raise ValueError("--lora_target_modules must contain at least one module name")
