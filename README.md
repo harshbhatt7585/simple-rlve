@@ -44,7 +44,7 @@ For `meta-llama/Llama-3.2-1B-Instruct`, make sure your Hugging Face account has 
 ### CPU-only run (slow, but useful for debugging)
 
 ```bash
-python train.py --use_cpu --max_steps 5 --num_episodes 32
+python train.py --device cpu --max_steps 5 --num_episodes 32
 ```
 
 ### Faster training profile (Unsloth-style settings)
@@ -60,7 +60,7 @@ python train.py \
 ```
 
 Notes:
-- `--use_vllm` requires GPU (not CPU mode).
+- `--use_vllm` requires GPU (`--device cuda`).
 - On GPUs around 16GB VRAM, the script auto-applies a conservative profile:
   - batch `1`, grad-accum `2`, generations `2`
   - completion length capped at `64`

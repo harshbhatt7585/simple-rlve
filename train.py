@@ -48,7 +48,12 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Use vLLM for generation by default (can be disabled with --no-use_vllm).",
     )
-    p.add_argument("--use_cpu", action="store_true")
+    p.add_argument(
+        "--device",
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="Execution device (defaults to cuda).",
+    )
     p.add_argument("--lora_r", type=int, default=16)
     p.add_argument("--lora_alpha", type=int, default=32)
     p.add_argument("--lora_dropout", type=float, default=0.05)
@@ -151,12 +156,12 @@ def make_lora_config(args: argparse.Namespace):
     )
 
 
-def make_model_init_kwargs(args: argparse.Namespace, dtype: torch.dtype, use_cpu: bool) -> dict:
+def make_model_init_kwargs(args: argparse.Namespace, dtype: torch.dtype, device: str) -> dict:
     kwargs = {"torch_dtype": dtype}
     if not args.load_in_4bit:
         return kwargs
-    if use_cpu:
-        raise ValueError("--load_in_4bit requires CUDA; disable --use_cpu and run on a GPU.")
+    if device == "cpu":
+        raise ValueError("--load_in_4bit requires CUDA; set --device cuda and run on a GPU.")
 
     from transformers import BitsAndBytesConfig
     
@@ -185,15 +190,19 @@ def main():
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    use_cpu = args.use_cpu or not torch.cuda.is_available()
-    has_cuda = not use_cpu
+    if args.device == "cuda" and not torch.cuda.is_available():
+        LOGGER.warning("CUDA requested via --device cuda but no CUDA device is available; falling back to CPU.")
+        args.device = "cpu"
+
+    has_cuda = args.device == "cuda"
+    use_cpu = not has_cuda
     use_bf16 = has_cuda and torch.cuda.is_bf16_supported()
     use_fp16 = has_cuda and not use_bf16
     dtype = torch.bfloat16 if use_bf16 else (torch.float16 if use_fp16 else torch.float32)
 
     # vLLM currently requires CUDA; if we are on CPU, silently disable it to avoid confusing errors.
     if use_cpu and args.use_vllm:
-        LOGGER.warning("Disabling vLLM because --use_cpu is set or no CUDA device is available.")
+        LOGGER.warning("Disabling vLLM because --device is set to cpu.")
         args.use_vllm = False
 
     output_dir = Path(args.output_dir)
@@ -219,7 +228,7 @@ def main():
         terminal_log_every=args.terminal_log_every,
     )
 
-    model_init_kwargs = make_model_init_kwargs(args=args, dtype=dtype, use_cpu=use_cpu)
+    model_init_kwargs = make_model_init_kwargs(args=args, dtype=dtype, device=args.device)
 
     grpo_args = GRPOConfig(
         output_dir=str(output_dir),
@@ -265,8 +274,8 @@ def main():
     trainer.remove_callback(PrinterCallback)
 
     LOGGER.info(
-        "Starting training | cpu=%s bf16=%s lora=%s 4bit=%s",
-        use_cpu,
+        "Starting training | device=%s bf16=%s 4bit=%s",
+        args.device,
         use_bf16,
         args.load_in_4bit,
     )
