@@ -64,11 +64,11 @@ LORA_TARGET_MODULES = (
 DATASET_ID = "namesarnav/time_expressions_dataset"
 DATASET_CACHE_DIR = PROJECT_ROOT / ".hf_datasets_cache"
 PROMPT_TEMPLATE = """You are given a sentence that may contain a date.
-Identify the date mentioned in the sentence and extract it in the format DD-MM-YY.
+Identify the date mentioned in the sentence and extract it in the format YYYY-MM-DD.
 
 Return the output JSON object only, strictly in the following JSON format:
 {
-  "date": "DD-MM-YY"
+  "date": "YYYY-MM-DD"
 }
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
@@ -149,7 +149,7 @@ def _normalize_date(value: Any) -> str | None:
     for candidate in candidates:
         parsed = _parse_date_candidate(candidate)
         if parsed is not None:
-            return parsed.strftime("%d-%m-%y")
+            return parsed.strftime("%Y-%m-%d")
     return None
 
 
@@ -158,11 +158,16 @@ def _parse_date_candidate(candidate: str) -> datetime | None:
     if not c:
         return None
 
+    try:
+        return datetime.fromisoformat(c.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+
     c_dash = c.replace("/", "-").replace(".", "-")
     formats = (
+        "%Y-%m-%d",
         "%d-%m-%y",
         "%d-%m-%Y",
-        "%Y-%m-%d",
         "%d %b %Y",
         "%d %B %Y",
         "%b %d %Y",
@@ -345,10 +350,27 @@ class DateNormalizationEnv:
                 return dataset[split_name]
         return next(iter(dataset.values()))
 
+    def _resolve_columns(self, split: Dataset) -> tuple[str, str]:
+        columns = list(split.column_names)
+        text_candidates = ("expression", "input_text", "sentence", "text", "input", "prompt", "question")
+        answer_candidates = ("resolved_value", "target_output", "output_text", "date", "normalized_date", "target", "answer", "label")
+
+        text_col = next((name for name in text_candidates if name in columns), None)
+        answer_col = next((name for name in answer_candidates if name in columns and name != text_col), None)
+
+        if text_col is None and columns:
+            text_col = columns[0]
+        if answer_col is None:
+            answer_col = next((name for name in columns if name != text_col), None)
+
+        if text_col is None or answer_col is None:
+            raise ValueError(f"Could not infer text/date columns from dataset columns: {columns}")
+        return text_col, answer_col
+
 
     def build_dataset(self, n: int) -> Dataset:
         split = self._load_split()
-        text_col, answer_col = ("input_text", "target_output")
+        text_col, answer_col = self._resolve_columns(split)
         total = len(split)
         if total == 0:
             raise ValueError("Loaded dataset split is empty.")
@@ -361,6 +383,8 @@ class DateNormalizationEnv:
         rows: list[dict[str, str]] = []
         for idx in indices:
             row = split[int(idx)]
+            if "type" in row and str(row["type"]).strip().lower() != "date":
+                continue
             question = str(row[text_col]).strip()
             answer = _normalize_date(row[answer_col])
             if not question or answer is None:
