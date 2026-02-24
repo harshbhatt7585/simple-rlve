@@ -37,7 +37,7 @@ python train.py \
   --max_steps 60
 ```
 
-If outputs drift from strict format, try a lower sampling temperature, for example: `--temperature 0.7`.
+If outputs drift from strict format, reduce `TEMPERATURE` in `train.py` (currently hardcoded).
 
 For `meta-llama/Llama-3.2-1B-Instruct`, make sure your Hugging Face account has accepted the model license and your environment is authenticated (`huggingface-cli login`).
 
@@ -64,35 +64,28 @@ Notes:
   - `vllm_gpu_memory_utilization=0.4`
   - `vllm_enable_sleep_mode=False`
   - `vllm_max_model_length=512`
+- Core GRPO hyperparameters are also hardcoded in `train.py`:
+  - `per_device_train_batch_size=1`
+  - `gradient_accumulation_steps=2`
+  - `num_generations=2`
+  - `max_completion_length=256`
+  - `learning_rate=1e-5`
+  - `temperature=1.0`
+  - `beta=0.0`
 
 ### Cleaner terminal logs
 
 ```bash
 python train.py \
   --terminal_log_every 1 \
-  --sample_log_every 1 \
-  --prediction_log_count 1 \
-  --sample_chars 160
+  --sample_log_every 1
 ```
 
 This prints per-step:
 - reward summary
 - prediction lines with `reward`, `expected`, `predicted`, and completion text snippet
 
-Default is quiet (`--terminal_log_every 0 --sample_log_every 0`) while still writing JSONL logs.
-
-Default behavior hides noisy raw trainer dict logs. If you want them back:
-
-```bash
-python train.py --keep_trainer_logs
-```
-
-Default behavior also suppresses external noise (HTTP request logs, model-load chatter, warning spam).
-If you want full external logs while debugging, use:
-
-```bash
-python train.py --show_external_logs
-```
+Set either value to `0` to reduce terminal output.
 
 ### W&B logging
 
@@ -103,12 +96,6 @@ python train.py --wandb
 W&B is fixed to:
 - project: `RLVR`
 - run name: environment name (`arithemetic_reasoning`)
-
-Offline W&B mode:
-
-```bash
-python train.py --wandb --wandb_mode offline
-```
 
 Note: W&B needs local socket support. In restricted sandboxes it will auto-fallback to normal training without W&B.
 

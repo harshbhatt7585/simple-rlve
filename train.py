@@ -31,6 +31,16 @@ VLLM_MODE = "colocate"
 VLLM_GPU_MEMORY_UTILIZATION = 0.4
 VLLM_ENABLE_SLEEP_MODE = False
 VLLM_MAX_MODEL_LENGTH = 512
+PER_DEVICE_TRAIN_BATCH_SIZE = 1
+GRADIENT_ACCUMULATION_STEPS = 2
+NUM_GENERATIONS = 2
+MAX_COMPLETION_LENGTH = 256
+LEARNING_RATE = 1e-5
+TEMPERATURE = 1.0
+BETA = 0.0
+SAVE_STEPS = 20
+NUM_ITERATIONS = 1
+STEPS_PER_GENERATION = 2
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
@@ -52,14 +62,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir", default="rlvr_outputs/run")
     p.add_argument("--num_episodes", type=int, default=256)
     p.add_argument("--max_steps", type=int, default=60)
-    # Default config is tuned to run with vLLM on a single T4-class GPU.
-    p.add_argument("--per_device_train_batch_size", type=int, default=1)
-    p.add_argument("--gradient_accumulation_steps", type=int, default=2)
-    p.add_argument("--num_generations", type=int, default=2)
-    p.add_argument("--max_completion_length", type=int, default=256)
-    p.add_argument("--learning_rate", type=float, default=1e-5)
-    p.add_argument("--temperature", type=float, default=1.0)
-    p.add_argument("--beta", type=float, default=0.0)
     p.add_argument(
         "--device",
         default="cuda",
@@ -75,19 +77,11 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "bfloat16", "float16", "float32"],
         help="Compute dtype used by 4-bit kernels (auto picks bf16/fp16/fp32 from hardware).",
     )
-    p.add_argument("--save_steps", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--terminal_log_every", type=int, default=1)
     p.add_argument("--sample_log_every", type=int, default=1)
     p.add_argument("--wandb", action="store_true")
-    p.add_argument("--num_iterations", type=int, default=1)
-    p.add_argument(
-        "--steps_per_generation",
-        type=int,
-        default=2,
-        help="Number of optimizer steps that share one batch of vLLM completions.",
-    )
-    
+
     return p.parse_args()
 
 
@@ -215,13 +209,13 @@ def main():
 
     grpo_args = GRPOConfig(
         output_dir=str(output_dir),
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
+        per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        learning_rate=LEARNING_RATE,
         max_steps=args.max_steps,
         logging_steps=1,
         save_strategy="steps",
-        save_steps=args.save_steps,
+        save_steps=SAVE_STEPS,
         save_total_limit=2,
         run_name=env.NAME,
         report_to="wandb" if args.wandb else "none",
@@ -229,10 +223,10 @@ def main():
         use_cpu=use_cpu,
         bf16=use_bf16,
         fp16=use_fp16,
-        num_generations=args.num_generations,
-        max_completion_length=args.max_completion_length,
-        temperature=args.temperature,
-        beta=args.beta,
+        num_generations=NUM_GENERATIONS,
+        max_completion_length=MAX_COMPLETION_LENGTH,
+        temperature=TEMPERATURE,
+        beta=BETA,
         use_vllm=use_vllm,
         model_init_kwargs=model_init_kwargs,
         log_completions=False,
@@ -240,8 +234,8 @@ def main():
         vllm_gpu_memory_utilization=VLLM_GPU_MEMORY_UTILIZATION,
         vllm_enable_sleep_mode=VLLM_ENABLE_SLEEP_MODE,
         vllm_max_model_length=VLLM_MAX_MODEL_LENGTH,
-        steps_per_generation=args.steps_per_generation,
-        num_iterations=args.num_iterations,
+        steps_per_generation=STEPS_PER_GENERATION,
+        num_iterations=NUM_ITERATIONS,
     )
 
     trainer = GRPOTrainer(
