@@ -28,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from training_logging import MetricsJSONLCallback, configure_external_logs
+from training_logging import MetricsJSONLCallback, configure_external_logs, format_terminal_log
 
 LOGGER = logging.getLogger("rlvr")
 WANDB_PROJECT = "RLVR"
@@ -357,42 +357,49 @@ class DateExtractionRewardLogger:
             if self.terminal_log_every > 0 and (logical_global_step + 1) % self.terminal_log_every == 0:
                 if done_rate is not None and avg_turns is not None:
                     LOGGER.info(
-                        (
-                            "episode_stats global_step=%s | reward=%.3f | json=%.1f%% | acc=%.1f%% "
-                            "| done=%.1f%% | turns=%.2f"
-                        ),
-                        rollout_global_step,
-                        reward_mean,
-                        json_valid_rate * 100.0,
-                        accuracy * 100.0,
-                        done_rate * 100.0,
-                        avg_turns,
+                        format_terminal_log(
+                            "episode",
+                            [
+                                ("global_step", rollout_global_step),
+                                ("reward", f"{reward_mean:.3f}"),
+                                ("json", f"{json_valid_rate * 100.0:.1f}%"),
+                                ("acc", f"{accuracy * 100.0:.1f}%"),
+                                ("done", f"{done_rate * 100.0:.1f}%"),
+                                ("turns", f"{avg_turns:.2f}"),
+                            ],
+                            color_code="34",
+                        )
                     )
                 else:
                     LOGGER.info(
-                        (
-                            "episode_stats global_step=%s | reward=%.3f | json=%.1f%% | acc=%.1f%%"
-                        ),
-                        rollout_global_step,
-                        reward_mean,
-                        json_valid_rate * 100.0,
-                        accuracy * 100.0,
+                        format_terminal_log(
+                            "episode",
+                            [
+                                ("global_step", rollout_global_step),
+                                ("reward", f"{reward_mean:.3f}"),
+                                ("json", f"{json_valid_rate * 100.0:.1f}%"),
+                                ("acc", f"{accuracy * 100.0:.1f}%"),
+                            ],
+                            color_code="34",
+                        )
                     )
 
                 if self.sample_log_every > 0 and (logical_global_step + 1) % self.sample_log_every == 0:
                     for record in sample_records:
                         LOGGER.info(
-                            (
-                                "sample | reward=%.3f | expected=%s | predicted=%s | json=%s "
-                                "| done=%s | turns=%s | text=%s"
-                            ),
-                            float(record["reward"]),
-                            record["expected_date"],
-                            record["predicted_date"],
-                            record["json_valid"],
-                            record["trajectory_done"],
-                            record["trajectory_turns"],
-                            _clip_text(str(record["completion"]), self.sample_chars),
+                            format_terminal_log(
+                                "sample",
+                                [
+                                    ("reward", f"{float(record['reward']):.3f}"),
+                                    ("expected", record["expected_date"]),
+                                    ("predicted", record["predicted_date"]),
+                                    ("json", record["json_valid"]),
+                                    ("done", record["trajectory_done"]),
+                                    ("turns", record["trajectory_turns"]),
+                                    ("text", _clip_text(str(record["completion"]), self.sample_chars)),
+                                ],
+                                color_code="35",
+                            )
                         )
 
         return rewards

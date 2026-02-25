@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sys
 import warnings
 from pathlib import Path
 from typing import Any
@@ -111,6 +112,34 @@ def _clip_text(text: str, max_chars: int) -> str:
     return one_line[: max(0, max_chars - 3)] + "..."
 
 
+def _supports_ansi_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("TERM", "").lower() == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def _color(text: str, ansi_code: str | None) -> str:
+    if ansi_code is None or not _supports_ansi_color():
+        return text
+    return f"\033[{ansi_code}m{text}\033[0m"
+
+
+def format_terminal_log(
+    label: str,
+    fields: list[tuple[str, Any]],
+    color_code: str | None = None,
+) -> str:
+    tag = _color(f"[{label.upper():<8}]", color_code)
+    rendered_fields = []
+    for key, value in fields:
+        if value is None:
+            continue
+        rendered_fields.append(f"{key}={value}")
+    return f"{tag} " + "  ".join(rendered_fields)
+
+
 class EpisodeRewardLogger:
     """Custom reward function that logs every generated episode."""
 
@@ -208,26 +237,30 @@ class EpisodeRewardLogger:
             logical_step = max(step, 0)
             if self.terminal_log_every > 0 and (logical_step + 1) % self.terminal_log_every == 0:
                 LOGGER.info(
-                    (
-                        "episode_stats global_step=%s | reward=%.3f "
-                        "| acc=%.1f%% | format=%.1f%%"
-                    ),
-                    step,
-                    reward_mean,
-                    accuracy * 100.0,
-                    format_rate * 100.0,
+                    format_terminal_log(
+                        "episode",
+                        [
+                            ("global_step", step),
+                            ("reward", f"{reward_mean:.3f}"),
+                            ("acc", f"{accuracy * 100.0:.1f}%"),
+                            ("format", f"{format_rate * 100.0:.1f}%"),
+                        ],
+                        color_code="36",
+                    )
                 )
                 if self.sample_log_every > 0 and (logical_step + 1) % self.sample_log_every == 0:
                     for record in sample_records:
                         LOGGER.info(
-                            (
-                                "sample | reward=%.3f | expected=%s | predicted=%s "
-                                "| text=%s"
-                            ),
-                            float(record["reward"]),
-                            record["expected_answer"],
-                            record["predicted_answer"],
-                            _clip_text(str(record["completion"]), self.sample_chars),
+                            format_terminal_log(
+                                "sample",
+                                [
+                                    ("reward", f"{float(record['reward']):.3f}"),
+                                    ("expected", record["expected_answer"]),
+                                    ("predicted", record["predicted_answer"]),
+                                    ("text", _clip_text(str(record["completion"]), self.sample_chars)),
+                                ],
+                                color_code="35",
+                            )
                         )
 
             if self.wandb_run is not None:
@@ -280,6 +313,7 @@ class MetricsJSONLCallback(TrainerCallback):
             try:
                 wandb.define_metric("global_step")
                 wandb.define_metric("reward", step_metric="global_step")
+                wandb.define_metric("/train/reward", step_metric="global_step")
                 wandb.define_metric("entropy", step_metric="global_step")
                 wandb.define_metric("completions/mean_length", step_metric="global_step")
                 wandb.define_metric("step_time", step_metric="global_step")
@@ -291,6 +325,8 @@ class MetricsJSONLCallback(TrainerCallback):
             key: value for key, value in payload.items() if isinstance(value, (int, float))
         }
         wandb_payload["global_step"] = global_step
+        if "reward" in payload:
+            wandb_payload["/train/reward"] = float(payload["reward"])
         try:
             run.log(wandb_payload, step=global_step)
         except Exception:
@@ -335,13 +371,23 @@ class MetricsJSONLCallback(TrainerCallback):
 
         if "reward" in payload:
             LOGGER.info(
-                "train global_step=%s | reward=%.3f",
-                global_step,
-                float(payload.get("reward", 0.0)),
+                format_terminal_log(
+                    "train",
+                    [
+                        ("global_step", global_step),
+                        ("reward", f"{float(payload.get('reward', 0.0)):.3f}"),
+                    ],
+                    color_code="32",
+                )
             )
         else:
             LOGGER.info(
-                "train_done runtime=%.2fs | train_loss=%.4f",
-                float(payload.get("train_runtime", 0.0)),
-                float(payload.get("train_loss", 0.0)),
+                format_terminal_log(
+                    "done",
+                    [
+                        ("runtime", f"{float(payload.get('train_runtime', 0.0)):.2f}s"),
+                        ("train_loss", f"{float(payload.get('train_loss', 0.0)):.4f}"),
+                    ],
+                    color_code="33",
+                )
             )
