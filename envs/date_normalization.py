@@ -507,7 +507,7 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
     @staticmethod
     def _retry_feedback(transition: dict[str, Any]) -> str:
         if transition.get("output") is None:
-            return 'No valid date found. Return only {"date":"YYYY-MM-DD"} with no extra text.'
+            return 'No valid date found. Return only {"date":"YYYY-MM-DD"}'
         if not bool(transition.get("format_ok", False)):
             return 'Format invalid. Return exactly {"date":"YYYY-MM-DD"} and nothing else.'
         return 'Wrong date. Recompute anchor date and offset. Return only {"date":"YYYY-MM-DD"}.'
