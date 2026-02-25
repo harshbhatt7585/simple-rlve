@@ -65,12 +65,19 @@ LORA_TARGET_MODULES = (
 DATASET_ID = "namesarnav/time_expressions_dataset"
 DATASET_CACHE_DIR = PROJECT_ROOT / ".hf_datasets_cache"
 PROMPT_TEMPLATE = """You are given a sentence that may contain a date.
-Identify the date mentioned in the sentence and extract it in the format YYYY-MM-DD.
+Normalize the date expression to a calendar date.
 
-Return the output JSON object only, strictly in the following JSON format:
-{
-  "date": "YYYY-MM-DD"
-}
+Reasoning procedure (do this internally before answering):
+1. Find the time expression.
+2. Identify the anchor date.
+3. Apply relative offsets exactly (days/weeks/months, weekday constraints, weekend).
+4. Validate the final date.
+
+Output rules:
+- Return JSON only.
+- No markdown, no code fences, no explanation, no extra keys.
+- Use this exact schema:
+{"date":"YYYY-MM-DD"}
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -497,8 +504,8 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
     @staticmethod
     def _retry_feedback(transition: dict[str, Any]) -> str:
         if transition.get("output") is None:
-            return 'Invalid JSON. Return only {"date":"YYYY-MM-DD"}.'
-        return 'Wrong date. Return only {"date":"YYYY-MM-DD"}.'
+            return 'Invalid format. Recompute internally and return only {"date":"YYYY-MM-DD"}.'
+        return 'Wrong date. Recompute anchor date + offset internally and return only {"date":"YYYY-MM-DD"}.'
 
     def _next_turn_prompt(
         self,
