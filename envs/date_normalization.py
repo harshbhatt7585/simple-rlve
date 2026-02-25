@@ -564,6 +564,8 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
                 transition = self.rollout_env.step(action_text)
                 self.global_rollout_step += 1
                 if self.rollout_log_every > 0 and self.global_rollout_step % self.rollout_log_every == 0:
+                    predicted_value = transition.get("output")
+                    predicted_display = predicted_value if predicted_value is not None else "null"
                     LOGGER.info(
                         format_terminal_log(
                             "rollout",
@@ -573,7 +575,7 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
                                 ("reward", f"{float(transition['reward']):.3f}"),
                                 ("done", bool(transition["done"])),
                                 ("expected", transition.get("ground_truth")),
-                                ("predicted", transition.get("output")),
+                                ("predicted", predicted_display),
                                 ("text", _clip_text(action_text, self.rollout_sample_chars)),
                             ],
                             color_code="90",
