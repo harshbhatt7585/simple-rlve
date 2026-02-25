@@ -361,8 +361,12 @@ class DateExtractionRewardLogger:
 class DateNormalizationEnv:
     NAME = "date_normalization"
 
-    def __init__(self, seed: int = 42):
+    def __init__(self, num_episodes, seed: int = 42):
         self.rng = random.Random(seed)
+        self.dataset = self.build_dataset(num_episodes)
+        self.num_episodes = num_episodes
+        self.current_episode = 0
+        self.current_data = self.dataset[0]
 
     def _load_split(self) -> Dataset:
         DATASET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -374,7 +378,28 @@ class DateNormalizationEnv:
             if split_name in dataset:
                 return dataset[split_name]
         return next(iter(dataset.values()))
+    
+    def reset(self):
+        self.current_episode = 0
+        self.current_data = self.dataset[0]
+        
 
+    def step(self, action):
+        try:
+            action = self.extract_answer(action)
+        except:
+            reward = -0.25
+        if action == self.current_data["answer"]:
+            reward = 1.0
+            self.done = True
+            if self.num_episodes < self.current_episode:
+                self.current_data = next(self.dataset)
+            self.reset()
+
+        
+        # step penalty
+        reward -= 0.1
+        
 
     def build_dataset(self, n: int) -> Dataset:
         split = self._load_split()
@@ -474,8 +499,11 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    env = DateNormalizationEnv(seed=args.seed)
+    
+
+    env = DateNormalizationEnv(args.num_episodes, seed=args.seed)
     train_dataset = env.build_dataset(args.num_episodes)
+    
     if args.wandb:
         os.environ["WANDB_PROJECT"] = WANDB_PROJECT
 
