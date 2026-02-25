@@ -324,6 +324,8 @@ class MetricsJSONLCallback(TrainerCallback):
         wandb_payload = {
             key: value for key, value in payload.items() if isinstance(value, (int, float))
         }
+        if "steps" in wandb_payload:
+            wandb_payload["rollout_steps"] = wandb_payload["steps"]
         wandb_payload["steps"] = steps
         if "reward" in payload:
             wandb_payload["/train/reward"] = float(payload["reward"])

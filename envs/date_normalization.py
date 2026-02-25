@@ -529,9 +529,9 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
         predicted = transition.get("output")
 
         if predicted is None:
-            return 'No valid date found. Return only {"date":"YYYY-MM-DD"}'
+            return "Previous output had no parseable date."
         if not bool(transition.get("format_ok", False)):
-            return 'Format invalid. Return exactly {"date":"YYYY-MM-DD"} and nothing else.'
+            return 'Format invalid: output must be exactly one JSON object {"date":"YYYY-MM-DD"}.'
 
         wrong_parts = _wrong_date_components(
             expected if isinstance(expected, str) else None,
@@ -543,10 +543,7 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
             wrong_hint = wrong_parts[0]
         else:
             wrong_hint = ", ".join(wrong_parts)
-        return (
-            f'Wrong component(s): {wrong_hint}. '
-            'Recompute anchor date and offset.'
-        )
+        return f"Date arithmetic incorrect. Wrong component(s): {wrong_hint}."
 
     def _next_turn_prompt(
         self,
@@ -560,9 +557,9 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
             previous_date = "null"
         return (
             f"{base_prompt}\n\n"
-            f"Attempt {turn_idx + 1} parsed_date: {previous_date}\n"
-            f"Feedback: {feedback}\n"
-            "Try again."
+            f"Previous parsed date: {previous_date}\n"
+            f"Correction: {feedback}\n"
+            'Return exactly: {"date":"YYYY-MM-DD"}'
         )
 
     @staticmethod
