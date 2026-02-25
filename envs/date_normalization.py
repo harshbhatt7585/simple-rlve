@@ -102,10 +102,8 @@ def parse_args() -> argparse.Namespace:
         "--log_after_every",
         type=int,
         default=1,
-        help="Log rollout progress every N rollout steps.",
+        help="Log all terminal progress every N rollout steps.",
     )
-    p.add_argument("--terminal_log_every", type=int, default=1)
-    p.add_argument("--sample_log_every", type=int, default=1)
     p.add_argument("--wandb", action="store_true")
 
     return p.parse_args()
@@ -251,16 +249,14 @@ class DateExtractionRewardLogger:
     def __init__(
         self,
         log_path: Path,
-        terminal_log_every: int = 1,
-        sample_log_every: int = 1,
+        log_after_every: int = 1,
         sample_chars: int = 160,
         prediction_log_count: int = 1,
     ) -> None:
         self.log_path = log_path
         self.episode_id = 0
         self.__name__ = "date_extraction_reward"
-        self.terminal_log_every = max(0, terminal_log_every)
-        self.sample_log_every = max(0, sample_log_every)
+        self.log_after_every = max(0, log_after_every)
         self.sample_chars = max(40, sample_chars)
         self.prediction_log_count = max(1, prediction_log_count)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -362,7 +358,7 @@ class DateExtractionRewardLogger:
             done_rate = (trajectory_done_count / batch_size) if has_trajectory_done else None
             avg_turns = (trajectory_turn_sum / batch_size) if has_trajectory_turns else None
 
-            if self.terminal_log_every > 0 and (logical_steps + 1) % self.terminal_log_every == 0:
+            if self.log_after_every > 0 and (logical_steps + 1) % self.log_after_every == 0:
                 if done_rate is not None and avg_turns is not None:
                     LOGGER.info(
                         format_terminal_log(
@@ -392,7 +388,7 @@ class DateExtractionRewardLogger:
                         )
                     )
 
-                if self.sample_log_every > 0 and (logical_steps + 1) % self.sample_log_every == 0:
+                if self.prediction_log_count > 0:
                     for record in sample_records:
                         LOGGER.info(
                             format_terminal_log(
@@ -722,13 +718,12 @@ def main():
 
     reward_fn = DateExtractionRewardLogger(
         output_dir / "episode_rewards.jsonl",
-        terminal_log_every=args.terminal_log_every,
-        sample_log_every=args.sample_log_every,
+        log_after_every=args.log_after_every,
     )
     callback = MetricsJSONLCallback(
         output_dir / "training_metrics.jsonl",
         max_steps=args.max_steps,
-        terminal_log_every=args.terminal_log_every,
+        terminal_log_every=args.log_after_every,
     )
 
     model_init_kwargs = make_model_init_kwargs(args=args, dtype=dtype, device=args.device)
