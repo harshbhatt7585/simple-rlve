@@ -382,11 +382,10 @@ class DateNormalizationEnv:
     def reset(self):
         self.current_episode = 0
         self.current_data = self.dataset[0]
-        
 
     def step(self, action):
         try:
-            action = self.extract_answer(action)
+            action = _extract_json_date(action)
         except:
             reward = -0.25
         if action == self.current_data["answer"]:
