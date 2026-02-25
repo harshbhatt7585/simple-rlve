@@ -384,11 +384,10 @@ class DateNormalizationEnv:
         self.current_data = self.dataset[0]
 
     def step(self, action):
-        try:
-            action = _extract_json_date(action)
-        except:
+        json_valid, action = _extract_json_date(action)
+        if not json_valid:
             reward = -0.25
-        if action == self.current_data["answer"]:
+        elif action == self.current_data["answer"]:
             reward = 1.0
             self.done = True
             if self.num_episodes < self.current_episode:
