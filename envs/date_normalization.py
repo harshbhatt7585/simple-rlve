@@ -40,7 +40,7 @@ VLLM_MAX_MODEL_LENGTH = 512
 PER_DEVICE_TRAIN_BATCH_SIZE = 1
 GRADIENT_ACCUMULATION_STEPS = 2
 NUM_GENERATIONS = 2
-MAX_COMPLETION_LENGTH = 64
+MAX_COMPLETION_LENGTH = 96
 LEARNING_RATE = 1e-5
 TEMPERATURE = 0.2
 BETA = 0.04
@@ -66,11 +66,6 @@ DATASET_ID = "namesarnav/time_expressions_dataset"
 DATASET_CACHE_DIR = PROJECT_ROOT / ".hf_datasets_cache"
 PROMPT_TEMPLATE = """You are given a sentence that may contain a relative time expression.
 Normalize the expression to the final calendar date.
-
-Reason internally:
-1. Find the anchor date.
-2. Apply offsets/directions (before, after, prior, next, weekend, weekday).
-3. Return the resolved date.
 
 Output requirements:
 - Return JSON only.
@@ -211,50 +206,33 @@ def _wrong_date_components(expected: str | None, predicted: str | None) -> list[
     return wrong or ["all"]
 
 
-def _extract_json_date(completion_text: str) -> tuple[bool, str | None]:
+def _extract_json_response(completion_text: str) -> tuple[bool, str | None]:
     raw = completion_text.strip()
     if not raw:
         return False, None
 
-    # Strict mode: completion must be exactly {"date":"YYYY-MM-DD"} (whitespace allowed).
     try:
         data = json.loads(raw)
-        if isinstance(data, dict) and set(data.keys()) == {"date"} and isinstance(data.get("date"), str):
+        if (
+            isinstance(data, dict)
+            and set(data.keys()) == {"date"}
+            and isinstance(data.get("date"), str)
+        ):
             return True, data["date"].strip()
     except Exception:
         pass
-
-    # Loose mode: recover first JSON object containing "date" so RL can still learn date arithmetic,
-    # while strict-format compliance remains separately rewarded.
-    for chunk in re.findall(r"\{[^{}]*\}", raw, flags=re.DOTALL):
-        try:
-            data = json.loads(chunk)
-        except Exception:
-            continue
-        if isinstance(data, dict) and "date" in data:
-            return False, str(data["date"]).strip()
 
     return False, None
 
 
 def _extract_expected_date(target_output: Any) -> str | None:
-    raw = str(target_output).strip() if target_output is not None else ""
-    if not raw:
-        return None
 
     try:
-        data = json.loads(raw)
+        data = json.loads(target_output)
     except Exception:
         return None
 
-    resolved_value: str | None = None
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        resolved_value = str(data[0].get("resolved_value", "")).strip() or None
-    elif isinstance(data, dict):
-        resolved_value = str(data.get("resolved_value", "")).strip() or None
-
-    if resolved_value is None:
-        return None
+    resolved_value = str(data[0].get("resolved_value", "")).strip() or None
     if not ISO_DATE_PATTERN.fullmatch(resolved_value):
         return None
     return resolved_value
@@ -315,7 +293,7 @@ class DateExtractionRewardLogger:
         for idx, (prompt, completion, expected, q) in enumerate(zip(prompts, completions, answer, question, strict=True)):
             completion_text = _as_text(completion)
             expected_norm = _normalize_date(expected)
-            json_valid, json_date_raw = _extract_json_date(completion_text)
+            json_valid, json_date_raw = _extract_json_response(completion_text)
             predicted_norm = _normalize_date(json_date_raw) if json_date_raw is not None else None
             is_correct = expected_norm is not None and predicted_norm == expected_norm
             rollout_done = bool(trajectory_done[idx]) if has_trajectory_done and idx < len(trajectory_done) else None
@@ -441,7 +419,7 @@ class DateNormalizationEnv:
         return self.current_episode.messages[self.current_step]
 
     def _normalize_action(self, action: Any) -> str | None:
-        json_valid, json_date = _extract_json_date(_as_text(action))
+        _, json_date = _extract_json_response(_as_text(action))
         if json_date is None:
             return None
         return _normalize_date(json_date)
@@ -452,7 +430,7 @@ class DateNormalizationEnv:
 
         current = self.current_episode.messages[self.current_step]
         ground_truth = current.answer
-        format_ok, json_date = _extract_json_date(_as_text(action))
+        format_ok, json_date = _extract_json_response(_as_text(action))
         output = _normalize_date(json_date) if json_date is not None else None
 
         if output is None:
@@ -581,7 +559,7 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
     def _assistant_retry_summary(transition: dict[str, Any]) -> str:
         predicted = transition.get("output")
         if predicted is None:
-            return '{"date":"INVALID"}'
+            return json.dumps({"date": "INVALID"}, ensure_ascii=True)
         return json.dumps({"date": predicted}, ensure_ascii=True)
 
     def _next_turn_user_message(
@@ -632,6 +610,8 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
                 last_completion_ids = generated_ids if generated_ids else [self.eos_token_id]
                 if turn_logprobs is not None:
                     last_logprobs = turn_logprobs[0]
+                
+
 
                 action_text = self.processing_class.decode(last_completion_ids, skip_special_tokens=True)
                 transition = self.rollout_env.step(action_text)
@@ -643,12 +623,12 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
                         format_terminal_log(
                             "rollout",
                             [
-                                ("steps", self.global_rollout_step),
-                                ("turn", turn_idx + 1),
-                                ("reward", f"{float(transition['reward']):.3f}"),
-                                ("done", bool(transition["done"])),
+                                # ("steps", self.global_rollout_step),
+                                # ("turn", turn_idx + 1),
+                                # ("reward", f"{float(transition['reward']):.3f}"),
+                                # ("done", bool(transition["done"])),
                                 ("expected", transition.get("ground_truth")),
-                                ("predicted", predicted_display),
+                                # ("predicted", predicted_display),
                                 ("text", _clip_text(action_text, self.rollout_sample_chars)),
                             ],
                             color_code="90",
