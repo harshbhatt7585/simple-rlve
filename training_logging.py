@@ -362,6 +362,12 @@ class MetricsJSONLCallback(TrainerCallback):
             payload["steps"] = int(float(payload["steps"]))
         except Exception:
             payload["steps"] = int(self._last_rollout_steps or state.global_step)
+
+        if payload["steps"] < self._last_rollout_steps:
+            payload["steps"] = self._last_rollout_steps
+        else:
+            self._last_rollout_steps = payload["steps"]
+
         payload.pop("global_step", None)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")

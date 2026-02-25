@@ -38,16 +38,16 @@ VLLM_GPU_MEMORY_UTILIZATION = 0.4
 VLLM_ENABLE_SLEEP_MODE = False
 VLLM_MAX_MODEL_LENGTH = 512
 PER_DEVICE_TRAIN_BATCH_SIZE = 1
-GRADIENT_ACCUMULATION_STEPS = 8
+GRADIENT_ACCUMULATION_STEPS = 2
 NUM_GENERATIONS = 2
-MAX_COMPLETION_LENGTH = 256
+MAX_COMPLETION_LENGTH = 64
 LEARNING_RATE = 1e-5
-TEMPERATURE = 1.0
-BETA = 0.0
+TEMPERATURE = 0.2
+BETA = 0.04
 SAVE_STEPS = 20
 NUM_ITERATIONS = 1
 STEPS_PER_GENERATION = 2
-MAX_ROLLOUT_TURNS = 10
+MAX_ROLLOUT_TURNS = 3
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
@@ -64,13 +64,18 @@ LORA_TARGET_MODULES = (
 
 DATASET_ID = "namesarnav/time_expressions_dataset"
 DATASET_CACHE_DIR = PROJECT_ROOT / ".hf_datasets_cache"
-PROMPT_TEMPLATE = """You are given a sentence that may contain a date.
-Identify the date mentioned in the sentence and extract it in the format YYYY-MM-DD.
+PROMPT_TEMPLATE = """You are given a sentence that may contain a relative time expression.
+Normalize the expression to the final calendar date.
 
-Return the output JSON object only, strictly in the following JSON format:
-{
-  "date": "YYYY-MM-DD"
-}
+Reason internally:
+1. Find the anchor date.
+2. Apply offsets/directions (before, after, prior, next, weekend, weekday).
+3. Return the resolved date.
+
+Output requirements:
+- Return JSON only.
+- No explanation, no markdown, no extra keys.
+- Use this exact schema: {"date":"YYYY-MM-DD"}
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -189,25 +194,23 @@ def _normalize_date(value: Any) -> str | None:
 
 def _extract_json_date(completion_text: str) -> tuple[bool, str | None]:
     raw = completion_text.strip()
-    json_candidates = [raw]
-    if "{" in raw and "}" in raw:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < end:
-            json_candidates.append(raw[start : end + 1])
-    json_candidates.extend(re.findall(r"\{[^{}]*\}", raw, flags=re.DOTALL))
+    if not raw:
+        return False, None
 
-    for chunk in json_candidates:
-        try:
-            data = json.loads(chunk)
-        except Exception:
-            continue
-        if not isinstance(data, dict):
-            return True, None
-        if "date" not in data:
-            return True, None
-        return True, str(data["date"])
-    return False, None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return False, None
+
+    if not isinstance(data, dict):
+        return False, None
+    if set(data.keys()) != {"date"}:
+        return False, None
+
+    date_value = data.get("date")
+    if not isinstance(date_value, str):
+        return False, None
+    return True, date_value.strip()
 
 
 def _extract_expected_date(target_output: Any) -> str | None:
@@ -297,12 +300,12 @@ class DateExtractionRewardLogger:
             if trajectory_reward is not None and idx < len(trajectory_reward):
                 total_reward = float(trajectory_reward[idx])
             else:
-                if not json_valid:
-                    total_reward = -0.25
+                if predicted_norm is None:
+                    total_reward = -0.5
                 elif is_correct:
                     total_reward = 1.0
                 else:
-                    total_reward = 0.0
+                    total_reward = -0.25
 
             rewards.append(total_reward)
             json_valid_count += int(json_valid)
@@ -428,12 +431,12 @@ class DateNormalizationEnv:
         output = self._normalize_action(action)
 
         if output is None:
-            reward = -0.25
+            reward = -0.5
         elif output == ground_truth:
             reward = 1.0
             self.done = True
         else:
-            reward = 0.0
+            reward = -0.25
 
         return {
             "output": output,
@@ -497,20 +500,22 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
     @staticmethod
     def _retry_feedback(transition: dict[str, Any]) -> str:
         if transition.get("output") is None:
-            return 'Invalid JSON. Return only {"date":"YYYY-MM-DD"}.'
-        return 'Wrong date. Return only {"date":"YYYY-MM-DD"}.'
+            return 'Invalid output. Return only {"date":"YYYY-MM-DD"} with no extra text.'
+        return 'Wrong date. Recompute anchor date and offset. Return only {"date":"YYYY-MM-DD"}.'
 
     def _next_turn_prompt(
         self,
         base_prompt: str,
         turn_idx: int,
-        action_text: str,
         transition: dict[str, Any],
     ) -> str:
         feedback = self._retry_feedback(transition)
+        previous_date = transition.get("output")
+        if previous_date is None:
+            previous_date = "null"
         return (
             f"{base_prompt}\n\n"
-            f"Attempt {turn_idx + 1}: {action_text}\n"
+            f"Attempt {turn_idx + 1} parsed_date: {previous_date}\n"
             f"Feedback: {feedback}\n"
             "Try again."
         )
@@ -581,7 +586,6 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
                 current_prompt = self._next_turn_prompt(
                     base_prompt=base_prompt,
                     turn_idx=turn_idx,
-                    action_text=action_text,
                     transition=transition,
                 )
 
