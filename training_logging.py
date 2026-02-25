@@ -209,13 +209,11 @@ class EpisodeRewardLogger:
             if self.terminal_log_every > 0 and (logical_step + 1) % self.terminal_log_every == 0:
                 LOGGER.info(
                     (
-                        "episode_stats global_step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
+                        "episode_stats global_step=%s | reward=%.3f "
                         "| acc=%.1f%% | format=%.1f%%"
                     ),
                     step,
                     reward_mean,
-                    reward_min,
-                    reward_max,
                     accuracy * 100.0,
                     format_rate * 100.0,
                 )
@@ -223,7 +221,7 @@ class EpisodeRewardLogger:
                     for record in sample_records:
                         LOGGER.info(
                             (
-                                "prediction | reward=%.3f | expected=%s predicted=%s "
+                                "sample | reward=%.3f | expected=%s | predicted=%s "
                                 "| text=%s"
                             ),
                             float(record["reward"]),
@@ -337,24 +335,13 @@ class MetricsJSONLCallback(TrainerCallback):
 
         if "reward" in payload:
             LOGGER.info(
-                (
-                    "train global_step=%s | reward=%.3f | "
-                    "entropy=%.3f | comp_len=%.1f | step_time=%.2fs"
-                ),
+                "train global_step=%s | reward=%.3f",
                 global_step,
                 float(payload.get("reward", 0.0)),
-                float(payload.get("entropy", 0.0)),
-                float(payload.get("completions/mean_length", 0.0)),
-                float(payload.get("step_time", 0.0)),
             )
         else:
             LOGGER.info(
-                (
-                    "train_done runtime=%.2fs | steps_per_sec=%.3f | "
-                    "samples_per_sec=%.3f | train_loss=%.4f"
-                ),
+                "train_done runtime=%.2fs | train_loss=%.4f",
                 float(payload.get("train_runtime", 0.0)),
-                float(payload.get("train_steps_per_second", 0.0)),
-                float(payload.get("train_samples_per_second", 0.0)),
                 float(payload.get("train_loss", 0.0)),
             )

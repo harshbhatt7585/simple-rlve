@@ -282,7 +282,6 @@ class DateExtractionRewardLogger:
         correct_count = 0
         trajectory_done_count = 0
         trajectory_turn_sum = 0
-        trajectory_turn_max = 0
         has_trajectory_done = trajectory_done is not None
         has_trajectory_turns = trajectory_turns is not None
         sample_records: list[dict[str, Any]] = []
@@ -313,7 +312,6 @@ class DateExtractionRewardLogger:
                 trajectory_done_count += int(rollout_done)
             if rollout_turns is not None:
                 trajectory_turn_sum += rollout_turns
-                trajectory_turn_max = max(trajectory_turn_max, rollout_turns)
 
             if len(sample_records) < self.prediction_log_count:
                 sample_records.append(
@@ -350,8 +348,6 @@ class DateExtractionRewardLogger:
         if rewards:
             batch_size = len(rewards)
             reward_mean = sum(rewards) / batch_size
-            reward_min = min(rewards)
-            reward_max = max(rewards)
             json_valid_rate = json_valid_count / batch_size
             accuracy = correct_count / batch_size
             logical_global_step = max(rollout_global_step, 0)
@@ -362,29 +358,23 @@ class DateExtractionRewardLogger:
                 if done_rate is not None and avg_turns is not None:
                     LOGGER.info(
                         (
-                            "episode_stats global_step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
-                            "| json_valid=%.1f%% | date_acc=%.1f%% | done=%.1f%% | turns(avg=%.2f max=%d)"
+                            "episode_stats global_step=%s | reward=%.3f | json=%.1f%% | acc=%.1f%% "
+                            "| done=%.1f%% | turns=%.2f"
                         ),
                         rollout_global_step,
                         reward_mean,
-                        reward_min,
-                        reward_max,
                         json_valid_rate * 100.0,
                         accuracy * 100.0,
                         done_rate * 100.0,
                         avg_turns,
-                        trajectory_turn_max,
                     )
                 else:
                     LOGGER.info(
                         (
-                            "episode_stats global_step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
-                            "| json_valid=%.1f%% | date_acc=%.1f%%"
+                            "episode_stats global_step=%s | reward=%.3f | json=%.1f%% | acc=%.1f%%"
                         ),
                         rollout_global_step,
                         reward_mean,
-                        reward_min,
-                        reward_max,
                         json_valid_rate * 100.0,
                         accuracy * 100.0,
                     )
@@ -393,13 +383,13 @@ class DateExtractionRewardLogger:
                     for record in sample_records:
                         LOGGER.info(
                             (
-                                "prediction | reward=%.3f | json_valid=%s | expected=%s predicted=%s "
-                                "| done=%s turns=%s | text=%s"
+                                "sample | reward=%.3f | expected=%s | predicted=%s | json=%s "
+                                "| done=%s | turns=%s | text=%s"
                             ),
                             float(record["reward"]),
-                            record["json_valid"],
                             record["expected_date"],
                             record["predicted_date"],
+                            record["json_valid"],
                             record["trajectory_done"],
                             record["trajectory_turns"],
                             _clip_text(str(record["completion"]), self.sample_chars),
