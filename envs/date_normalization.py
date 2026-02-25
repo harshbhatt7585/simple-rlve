@@ -545,7 +545,7 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
             wrong_hint = ", ".join(wrong_parts)
         return (
             f'Wrong component(s): {wrong_hint}. '
-            'Recompute anchor date and offset. Return only {"date":"YYYY-MM-DD"}.'
+            'Recompute anchor date and offset.'
         )
 
     def _next_turn_prompt(
