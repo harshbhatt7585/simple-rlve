@@ -192,6 +192,25 @@ def _normalize_date(value: Any) -> str | None:
     return None
 
 
+def _wrong_date_components(expected: str | None, predicted: str | None) -> list[str]:
+    if expected is None or predicted is None:
+        return ["all"]
+    if not ISO_DATE_PATTERN.fullmatch(expected) or not ISO_DATE_PATTERN.fullmatch(predicted):
+        return ["all"]
+
+    exp_year, exp_month, exp_day = expected.split("-")
+    pred_year, pred_month, pred_day = predicted.split("-")
+    wrong: list[str] = []
+    if exp_year != pred_year:
+        wrong.append("YYYY")
+    if exp_month != pred_month:
+        wrong.append("MM")
+    if exp_day != pred_day:
+        wrong.append("DD")
+
+    return wrong or ["all"]
+
+
 def _extract_json_date(completion_text: str) -> tuple[bool, str | None]:
     raw = completion_text.strip()
     if not raw:
@@ -506,11 +525,28 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
 
     @staticmethod
     def _retry_feedback(transition: dict[str, Any]) -> str:
-        if transition.get("output") is None:
+        expected = transition.get("ground_truth")
+        predicted = transition.get("output")
+
+        if predicted is None:
             return 'No valid date found. Return only {"date":"YYYY-MM-DD"}'
         if not bool(transition.get("format_ok", False)):
             return 'Format invalid. Return exactly {"date":"YYYY-MM-DD"} and nothing else.'
-        return 'Wrong date. Recompute anchor date and offset. Return only {"date":"YYYY-MM-DD"}.'
+
+        wrong_parts = _wrong_date_components(
+            expected if isinstance(expected, str) else None,
+            predicted if isinstance(predicted, str) else None,
+        )
+        if len(wrong_parts) == 3:
+            wrong_hint = "all"
+        elif len(wrong_parts) == 1:
+            wrong_hint = wrong_parts[0]
+        else:
+            wrong_hint = ", ".join(wrong_parts)
+        return (
+            f'Wrong component(s): {wrong_hint}. '
+            'Recompute anchor date and offset. Return only {"date":"YYYY-MM-DD"}.'
+        )
 
     def _next_turn_prompt(
         self,
