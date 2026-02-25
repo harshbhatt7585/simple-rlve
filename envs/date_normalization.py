@@ -47,6 +47,7 @@ BETA = 0.0
 SAVE_STEPS = 20
 NUM_ITERATIONS = 1
 STEPS_PER_GENERATION = 2
+MAX_ROLLOUT_TURNS = 3
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
@@ -110,6 +111,7 @@ class Message:
     question: str
     answer: str
 
+
 @dataclass
 class Episode:
     messages: List[Message]
@@ -134,41 +136,17 @@ def _clip_text(text: str, max_chars: int) -> str:
     return one_line[: max(0, max_chars - 3)] + "..."
 
 
-def _normalize_date(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
+def _parse_date_candidate(candidate: str) -> datetime | None:
+    text = candidate.strip()
     if not text:
         return None
 
-    candidates: list[str] = [text]
-    if text.startswith("{") and text.endswith("}"):
-        try:
-            data = json.loads(text)
-            if isinstance(data, dict) and "date" in data:
-                candidates.insert(0, str(data["date"]).strip())
-        except Exception:
-            pass
-    candidates.extend(DATE_VALUE_PATTERN.findall(text))
-
-    for candidate in candidates:
-        parsed = _parse_date_candidate(candidate)
-        if parsed is not None:
-            return parsed.strftime("%Y-%m-%d")
-    return None
-
-
-def _parse_date_candidate(candidate: str) -> datetime | None:
-    c = candidate.strip()
-    if not c:
-        return None
-
     try:
-        return datetime.fromisoformat(c.replace("Z", "+00:00"))
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         pass
 
-    c_dash = c.replace("/", "-").replace(".", "-")
+    normalized = text.replace("/", "-").replace(".", "-")
     formats = (
         "%Y-%m-%d",
         "%d-%m-%y",
@@ -181,11 +159,27 @@ def _parse_date_candidate(candidate: str) -> datetime | None:
         "%B %d, %Y",
     )
     for fmt in formats:
-        for candidate_variant in (c_dash, c):
+        for candidate_variant in (normalized, text):
             try:
                 return datetime.strptime(candidate_variant, fmt)
             except ValueError:
                 continue
+    return None
+
+
+def _normalize_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    candidates = [text]
+    candidates.extend(DATE_VALUE_PATTERN.findall(text))
+    for candidate in candidates:
+        parsed = _parse_date_candidate(candidate)
+        if parsed is not None:
+            return parsed.strftime("%Y-%m-%d")
     return None
 
 
@@ -204,30 +198,29 @@ def _extract_json_date(completion_text: str) -> tuple[bool, str | None]:
             data = json.loads(chunk)
         except Exception:
             continue
-        if isinstance(data, dict):
-            if "date" in data:
-                return True, str(data["date"])
+        if not isinstance(data, dict):
             return True, None
-        return True, None
+        if "date" not in data:
+            return True, None
+        return True, str(data["date"])
     return False, None
 
 
-def _extract_expected_date(value: Any) -> str | None:
-    """Extract expected date from dataset JSON as a strict single ISO date."""
-    raw = str(value).strip() if value is not None else ""
+def _extract_expected_date(target_output: Any) -> str | None:
+    raw = str(target_output).strip() if target_output is not None else ""
     if not raw:
         return None
 
     try:
-        parsed = json.loads(raw)
+        data = json.loads(raw)
     except Exception:
         return None
 
     resolved_value: str | None = None
-    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-        resolved_value = str(parsed[0].get("resolved_value", "")).strip() or None
-    elif isinstance(parsed, dict):
-        resolved_value = str(parsed.get("resolved_value", "")).strip() or None
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        resolved_value = str(data[0].get("resolved_value", "")).strip() or None
+    elif isinstance(data, dict):
+        resolved_value = str(data.get("resolved_value", "")).strip() or None
 
     if resolved_value is None:
         return None
@@ -236,8 +229,18 @@ def _extract_expected_date(value: Any) -> str | None:
     return resolved_value
 
 
+def _extract_messages(input_text: Any, target_output: Any) -> list[Message]:
+    question = str(input_text).strip()
+    answer = _extract_expected_date(target_output)
+    if not question or answer is None:
+        return []
+
+    prompt = f"{PROMPT_TEMPLATE}\nSentence: {question}"
+    return [Message(prompt=prompt, question=question, answer=answer)]
+
+
 class DateExtractionRewardLogger:
-    """Reward function with dense scoring for JSON validity + answer correctness."""
+    """Reward function with strict JSON parsing and date correctness checks."""
 
     def __init__(
         self,
@@ -263,6 +266,9 @@ class DateExtractionRewardLogger:
         completions: list[Any],
         answer: list[str],
         question: list[str],
+        trajectory_reward: list[float] | None = None,
+        trajectory_done: list[bool] | None = None,
+        trajectory_turns: list[int] | None = None,
         trainer_state=None,
         **_: Any,
     ) -> list[float]:
@@ -272,23 +278,22 @@ class DateExtractionRewardLogger:
         correct_count = 0
         sample_records: list[dict[str, Any]] = []
 
-        for prompt, completion, expected, q in zip(prompts, completions, answer, question, strict=True):
+        for idx, (prompt, completion, expected, q) in enumerate(zip(prompts, completions, answer, question, strict=True)):
             completion_text = _as_text(completion)
             expected_norm = _normalize_date(expected)
             json_valid, json_date_raw = _extract_json_date(completion_text)
-
             predicted_norm = _normalize_date(json_date_raw) if json_valid else None
             is_correct = expected_norm is not None and predicted_norm == expected_norm
 
-            # Strict JSON policy:
-            # 1) if JSON cannot be parsed, reward is always -0.25
-            # 2) if JSON parses, reward is 1.0 for correct date, else 0.0
-            if not json_valid:
-                total_reward = -0.25
-            elif is_correct:
-                total_reward = 1.0
+            if trajectory_reward is not None and idx < len(trajectory_reward):
+                total_reward = float(trajectory_reward[idx])
             else:
-                total_reward = 0.0
+                if not json_valid:
+                    total_reward = -0.25
+                elif is_correct:
+                    total_reward = 1.0
+                else:
+                    total_reward = 0.0
 
             rewards.append(total_reward)
             json_valid_count += int(json_valid)
@@ -314,12 +319,14 @@ class DateExtractionRewardLogger:
                 "predicted_date": predicted_norm,
                 "json_valid": json_valid,
                 "is_correct": is_correct,
+                "trajectory_done": trajectory_done[idx] if trajectory_done is not None and idx < len(trajectory_done) else None,
+                "trajectory_turns": trajectory_turns[idx] if trajectory_turns is not None and idx < len(trajectory_turns) else None,
                 "total_reward": total_reward,
                 "prompt": _as_text(prompt),
                 "completion": completion_text,
             }
-            with self.log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(log_record) + "\n")
+            with self.log_path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(log_record) + "\n")
             self.episode_id += 1
 
         if rewards:
@@ -361,45 +368,75 @@ class DateExtractionRewardLogger:
 class DateNormalizationEnv:
     NAME = "date_normalization"
 
-    def __init__(self, num_episodes, seed: int = 42):
+    def __init__(self, num_episodes: int, seed: int = 42):
         self.rng = random.Random(seed)
-        self.dataset = self.build_dataset(num_episodes)
-        self.num_episodes = num_episodes
-        self.current_episode = 0
-        self.current_data = self.dataset[0]
+        self.episodes, self.dataset = self.build_dataset(num_episodes)
+        self.episode_by_prompt = {
+            episode.messages[0].prompt: episode for episode in self.episodes if episode.messages
+        }
+        self.current_episode: Episode | None = None
+        self.current_step = 0
+        self.done = False
+        if self.episodes:
+            self.reset(episode=self.episodes[0])
 
     def _load_split(self) -> Dataset:
         DATASET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         dataset = load_dataset(DATASET_ID, cache_dir=str(DATASET_CACHE_DIR))
         if isinstance(dataset, Dataset):
             return dataset
-
         for split_name in ("train", "validation", "test"):
             if split_name in dataset:
                 return dataset[split_name]
         return next(iter(dataset.values()))
-    
-    def reset(self):
-        self.current_episode = 0
-        self.current_data = self.dataset[0]
 
-    def step(self, action):
-        json_valid, action = _extract_json_date(action)
+    def reset(self, episode: Episode | None = None, prompt: str | None = None) -> Message:
+        if not self.episodes:
+            raise ValueError("No episodes available; dataset loading returned zero valid rows.")
+
+        if episode is None and prompt is not None:
+            episode = self.episode_by_prompt.get(prompt)
+        if episode is None:
+            episode = self.rng.choice(self.episodes)
+
+        self.current_episode = episode
+        self.current_step = 0
+        self.done = False
+        if not self.current_episode.messages:
+            raise ValueError("Episode has no messages.")
+        return self.current_episode.messages[self.current_step]
+
+    def _normalize_action(self, action: Any) -> str | None:
+        json_valid, json_date = _extract_json_date(_as_text(action))
         if not json_valid:
+            return None
+        return _normalize_date(json_date)
+
+    def step(self, action: Any) -> dict[str, Any]:
+        if self.current_episode is None:
+            raise RuntimeError("Call reset() before step().")
+
+        current = self.current_episode.messages[self.current_step]
+        ground_truth = current.answer
+        output = self._normalize_action(action)
+
+        if output is None:
             reward = -0.25
-        elif action == self.current_data["answer"]:
+        elif output == ground_truth:
             reward = 1.0
             self.done = True
-            if self.num_episodes < self.current_episode:
-                self.current_data = next(self.dataset)
-            self.reset()
+        else:
+            reward = 0.0
 
-        
-        # step penalty
-        reward -= 0.1
-        
+        return {
+            "output": output,
+            "ground_truth": ground_truth,
+            "reward": reward,
+            "done": self.done,
+            "step": self.current_step,
+        }
 
-    def build_dataset(self, n: int) -> Dataset:
+    def build_dataset(self, n: int) -> tuple[list[Episode], Dataset]:
         split = self._load_split()
         text_col, answer_col = ("input_text", "target_output")
         total = len(split)
@@ -411,25 +448,122 @@ class DateNormalizationEnv:
         else:
             indices = [self.rng.randrange(total) for _ in range(n)]
 
+        episodes: list[Episode] = []
         rows: list[dict[str, str]] = []
         for idx in indices:
             row = split[int(idx)]
-            if "type" in row and str(row["type"]).strip().lower() != "date":
+            messages = _extract_messages(row[text_col], row[answer_col])
+            if not messages:
                 continue
-            question = str(row[text_col]).strip()
-            answer = _extract_expected_date(row[answer_col])
-            if not question or answer is None:
-                continue
-
-            prompt = f"{PROMPT_TEMPLATE}\nSentence: {question}"
-            rows.append(vars(Episode(prompt=prompt, question=question, answer=answer)))
+            episode = Episode(messages=messages)
+            episodes.append(episode)
+            for message in episode.messages:
+                rows.append(vars(message))
 
         if not rows:
             raise ValueError(
                 "No valid rows were produced from the dataset. "
                 "Check source columns and date format normalization."
             )
-        return Dataset.from_list(rows)
+        return episodes, Dataset.from_list(rows)
+
+
+class MultiTurnGRPOTrainer(GRPOTrainer):
+    """GRPO trainer with explicit environment rollouts over multiple turns."""
+
+    def __init__(self, *args, rollout_env: DateNormalizationEnv, max_rollout_turns: int = MAX_ROLLOUT_TURNS, **kwargs):
+        self.rollout_env = rollout_env
+        self.max_rollout_turns = max(1, int(max_rollout_turns))
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _retry_feedback(transition: dict[str, Any]) -> str:
+        if transition.get("output") is None:
+            return 'Invalid JSON. Return only {"date":"YYYY-MM-DD"}.'
+        return 'Wrong date. Return only {"date":"YYYY-MM-DD"}.'
+
+    def _next_turn_prompt(
+        self,
+        base_prompt: str,
+        turn_idx: int,
+        action_text: str,
+        transition: dict[str, Any],
+    ) -> str:
+        feedback = self._retry_feedback(transition)
+        return (
+            f"{base_prompt}\n\n"
+            f"Attempt {turn_idx + 1}: {action_text}\n"
+            f"Feedback: {feedback}\n"
+            "Try again."
+        )
+
+    @staticmethod
+    def _align_logprobs(logprobs: list[float] | None, completion_ids: list[int]) -> list[float]:
+        if logprobs is None:
+            return [0.0] * len(completion_ids)
+        if len(logprobs) == len(completion_ids):
+            return logprobs
+        if len(logprobs) > len(completion_ids):
+            return logprobs[: len(completion_ids)]
+        return logprobs + [0.0] * (len(completion_ids) - len(logprobs))
+
+    def _generate_single_turn(self, prompts: list):
+        prompt_ids: list[list[int]] = []
+        completion_ids: list[list[int]] = []
+        logprobs: list[list[float]] | None = [] if self.use_vllm else None
+        trajectory_reward: list[float] = []
+        trajectory_done: list[bool] = []
+        trajectory_turns: list[int] = []
+
+        for raw_prompt in prompts:
+            prompt_text = _as_text(raw_prompt)
+            current_message = self.rollout_env.reset(prompt=prompt_text)
+            base_prompt = current_message.prompt
+            current_prompt = base_prompt
+
+            total_reward = 0.0
+            done = False
+            turns_used = 0
+            last_prompt_ids: list[int] = []
+            last_completion_ids: list[int] = [self.eos_token_id]
+            last_logprobs: list[float] | None = None
+
+            for turn_idx in range(self.max_rollout_turns):
+                turns_used = turn_idx + 1
+                turn_prompt_ids, turn_completion_ids, turn_logprobs, _ = super()._generate_single_turn([current_prompt])
+                last_prompt_ids = turn_prompt_ids[0]
+                generated_ids = turn_completion_ids[0]
+                last_completion_ids = generated_ids if generated_ids else [self.eos_token_id]
+                if turn_logprobs is not None:
+                    last_logprobs = turn_logprobs[0]
+
+                action_text = self.processing_class.decode(last_completion_ids, skip_special_tokens=True)
+                transition = self.rollout_env.step(action_text)
+                total_reward += float(transition["reward"])
+                done = bool(transition["done"])
+                if done:
+                    break
+                current_prompt = self._next_turn_prompt(
+                    base_prompt=base_prompt,
+                    turn_idx=turn_idx,
+                    action_text=action_text,
+                    transition=transition,
+                )
+
+            prompt_ids.append(last_prompt_ids)
+            completion_ids.append(last_completion_ids)
+            trajectory_reward.append(total_reward)
+            trajectory_done.append(done)
+            trajectory_turns.append(turns_used)
+            if logprobs is not None:
+                logprobs.append(self._align_logprobs(last_logprobs, last_completion_ids))
+
+        extra_fields = {
+            "trajectory_reward": trajectory_reward,
+            "trajectory_done": trajectory_done,
+            "trajectory_turns": trajectory_turns,
+        }
+        return prompt_ids, completion_ids, logprobs, extra_fields
 
 
 def make_lora_config():
@@ -497,11 +631,9 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    
-
     env = DateNormalizationEnv(args.num_episodes, seed=args.seed)
-    train_dataset = env.build_dataset(args.num_episodes)
-    
+    train_dataset = env.dataset
+
     if args.wandb:
         os.environ["WANDB_PROJECT"] = WANDB_PROJECT
 
@@ -554,7 +686,7 @@ def main():
     )
     grpo_args = GRPOConfig(**grpo_kwargs)
 
-    trainer = GRPOTrainer(
+    trainer = MultiTurnGRPOTrainer(
         model=args.model_name,
         reward_funcs=reward_fn,
         args=grpo_args,
@@ -562,15 +694,18 @@ def main():
         processing_class=tokenizer,
         callbacks=[callback],
         peft_config=make_lora_config(),
+        rollout_env=env,
+        max_rollout_turns=MAX_ROLLOUT_TURNS,
     )
     trainer.remove_callback(ProgressCallback)
     trainer.remove_callback(PrinterCallback)
 
     LOGGER.info(
-        "Starting training | device=%s bf16=%s 4bit=%s",
+        "Starting training | device=%s bf16=%s 4bit=%s max_rollout_turns=%s",
         args.device,
         use_bf16,
         args.load_in_4bit,
+        MAX_ROLLOUT_TURNS,
     )
     trainer.train()
 
