@@ -11,7 +11,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 
 from peft import LoraConfig
 
@@ -105,10 +105,14 @@ def parse_args() -> argparse.Namespace:
 
 
 @dataclass
-class Episode:
+class Message:
     prompt: str
     question: str
     answer: str
+
+@dataclass
+class Episode:
+    messages: List[Message]
 
 
 def _as_text(value: Any) -> str:
