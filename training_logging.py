@@ -380,7 +380,8 @@ class MetricsJSONLCallback(TrainerCallback):
         if not should_log:
             return
 
-        self._log_to_wandb(payload, steps=steps)
+        # Keep wandb step aligned with Trainer global_step to avoid out-of-order step warnings.
+        self._log_to_wandb(payload, steps=int(state.global_step))
 
         if "reward" in payload:
             LOGGER.info(

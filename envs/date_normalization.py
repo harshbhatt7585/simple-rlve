@@ -197,20 +197,25 @@ def _extract_json_date(completion_text: str) -> tuple[bool, str | None]:
     if not raw:
         return False, None
 
+    # Strict mode: completion must be exactly {"date":"YYYY-MM-DD"} (whitespace allowed).
     try:
         data = json.loads(raw)
+        if isinstance(data, dict) and set(data.keys()) == {"date"} and isinstance(data.get("date"), str):
+            return True, data["date"].strip()
     except Exception:
-        return False, None
+        pass
 
-    if not isinstance(data, dict):
-        return False, None
-    if set(data.keys()) != {"date"}:
-        return False, None
+    # Loose mode: recover first JSON object containing "date" so RL can still learn date arithmetic,
+    # while strict-format compliance remains separately rewarded.
+    for chunk in re.findall(r"\{[^{}]*\}", raw, flags=re.DOTALL):
+        try:
+            data = json.loads(chunk)
+        except Exception:
+            continue
+        if isinstance(data, dict) and "date" in data:
+            return False, str(data["date"]).strip()
 
-    date_value = data.get("date")
-    if not isinstance(date_value, str):
-        return False, None
-    return True, date_value.strip()
+    return False, None
 
 
 def _extract_expected_date(target_output: Any) -> str | None:
@@ -292,7 +297,7 @@ class DateExtractionRewardLogger:
             completion_text = _as_text(completion)
             expected_norm = _normalize_date(expected)
             json_valid, json_date_raw = _extract_json_date(completion_text)
-            predicted_norm = _normalize_date(json_date_raw) if json_valid else None
+            predicted_norm = _normalize_date(json_date_raw) if json_date_raw is not None else None
             is_correct = expected_norm is not None and predicted_norm == expected_norm
             rollout_done = bool(trajectory_done[idx]) if has_trajectory_done and idx < len(trajectory_done) else None
             rollout_turns = int(trajectory_turns[idx]) if has_trajectory_turns and idx < len(trajectory_turns) else None
@@ -303,9 +308,9 @@ class DateExtractionRewardLogger:
                 if predicted_norm is None:
                     total_reward = -0.5
                 elif is_correct:
-                    total_reward = 1.0
+                    total_reward = 1.0 if json_valid else 0.5
                 else:
-                    total_reward = -0.25
+                    total_reward = -0.25 if json_valid else -0.5
 
             rewards.append(total_reward)
             json_valid_count += int(json_valid)
@@ -418,7 +423,7 @@ class DateNormalizationEnv:
 
     def _normalize_action(self, action: Any) -> str | None:
         json_valid, json_date = _extract_json_date(_as_text(action))
-        if not json_valid:
+        if json_date is None:
             return None
         return _normalize_date(json_date)
 
@@ -428,19 +433,21 @@ class DateNormalizationEnv:
 
         current = self.current_episode.messages[self.current_step]
         ground_truth = current.answer
-        output = self._normalize_action(action)
+        format_ok, json_date = _extract_json_date(_as_text(action))
+        output = _normalize_date(json_date) if json_date is not None else None
 
         if output is None:
             reward = -0.5
         elif output == ground_truth:
-            reward = 1.0
+            reward = 1.0 if format_ok else 0.5
             self.done = True
         else:
-            reward = -0.25
+            reward = -0.25 if format_ok else -0.5
 
         return {
             "output": output,
             "ground_truth": ground_truth,
+            "format_ok": format_ok,
             "reward": reward,
             "done": self.done,
             "step": self.current_step,
@@ -500,7 +507,9 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
     @staticmethod
     def _retry_feedback(transition: dict[str, Any]) -> str:
         if transition.get("output") is None:
-            return 'Invalid output. Return only {"date":"YYYY-MM-DD"} with no extra text.'
+            return 'No valid date found. Return only {"date":"YYYY-MM-DD"} with no extra text.'
+        if not bool(transition.get("format_ok", False)):
+            return 'Format invalid. Return exactly {"date":"YYYY-MM-DD"} and nothing else.'
         return 'Wrong date. Recompute anchor date and offset. Return only {"date":"YYYY-MM-DD"}.'
 
     def _next_turn_prompt(
