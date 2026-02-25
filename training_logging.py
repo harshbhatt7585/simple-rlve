@@ -209,7 +209,7 @@ class EpisodeRewardLogger:
 
             log_record = {
                 "episode_id": self.episode_id,
-                "global_step": step,
+                "steps": step,
                 "question": q,
                 "expected_answer": expected,
                 "predicted_answer": predicted,
@@ -240,7 +240,7 @@ class EpisodeRewardLogger:
                     format_terminal_log(
                         "episode",
                         [
-                            ("global_step", step),
+                            ("steps", step),
                             ("reward", f"{reward_mean:.3f}"),
                             ("acc", f"{accuracy * 100.0:.1f}%"),
                             ("format", f"{format_rate * 100.0:.1f}%"),
@@ -295,11 +295,11 @@ class MetricsJSONLCallback(TrainerCallback):
         self.max_steps = max_steps
         self.terminal_log_every = max(0, terminal_log_every)
         self._wandb_metrics_initialized = False
-        self._last_rollout_global_step = 0
+        self._last_rollout_steps = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text("")
 
-    def _log_to_wandb(self, payload: dict[str, Any], global_step: int) -> None:
+    def _log_to_wandb(self, payload: dict[str, Any], steps: int) -> None:
         try:
             import wandb
         except Exception:
@@ -311,12 +311,12 @@ class MetricsJSONLCallback(TrainerCallback):
 
         if not self._wandb_metrics_initialized:
             try:
-                wandb.define_metric("global_step")
-                wandb.define_metric("reward", step_metric="global_step")
-                wandb.define_metric("/train/reward", step_metric="global_step")
-                wandb.define_metric("entropy", step_metric="global_step")
-                wandb.define_metric("completions/mean_length", step_metric="global_step")
-                wandb.define_metric("step_time", step_metric="global_step")
+                wandb.define_metric("steps")
+                wandb.define_metric("reward", step_metric="steps")
+                wandb.define_metric("/train/reward", step_metric="steps")
+                wandb.define_metric("entropy", step_metric="steps")
+                wandb.define_metric("completions/mean_length", step_metric="steps")
+                wandb.define_metric("step_time", step_metric="steps")
             except Exception:
                 pass
             self._wandb_metrics_initialized = True
@@ -324,11 +324,11 @@ class MetricsJSONLCallback(TrainerCallback):
         wandb_payload = {
             key: value for key, value in payload.items() if isinstance(value, (int, float))
         }
-        wandb_payload["global_step"] = global_step
+        wandb_payload["steps"] = steps
         if "reward" in payload:
             wandb_payload["/train/reward"] = float(payload["reward"])
         try:
-            run.log(wandb_payload, step=global_step)
+            run.log(wandb_payload, step=steps)
         except Exception:
             pass
 
@@ -341,40 +341,47 @@ class MetricsJSONLCallback(TrainerCallback):
             for k, v in logs.items()
             if isinstance(v, (int, float, str)) and k not in excluded_keys
         }
-        payload = {"global_step": int(state.global_step), "epoch": float(state.epoch or 0.0), **numeric_logs}
-        if "global_step" in numeric_logs:
+        payload = {"steps": int(state.global_step), "epoch": float(state.epoch or 0.0), **numeric_logs}
+        if "steps" in numeric_logs:
             try:
-                self._last_rollout_global_step = int(float(numeric_logs["global_step"]))
+                self._last_rollout_steps = int(float(numeric_logs["steps"]))
             except Exception:
                 pass
-        elif self._last_rollout_global_step > 0:
-            payload["global_step"] = self._last_rollout_global_step
+        elif "global_step" in numeric_logs:
+            try:
+                self._last_rollout_steps = int(float(numeric_logs["global_step"]))
+                payload["steps"] = self._last_rollout_steps
+            except Exception:
+                pass
+        elif self._last_rollout_steps > 0:
+            payload["steps"] = self._last_rollout_steps
         else:
-            payload["global_step"] = int(state.global_step)
+            payload["steps"] = int(state.global_step)
 
         try:
-            payload["global_step"] = int(float(payload["global_step"]))
+            payload["steps"] = int(float(payload["steps"]))
         except Exception:
-            payload["global_step"] = int(self._last_rollout_global_step or state.global_step)
+            payload["steps"] = int(self._last_rollout_steps or state.global_step)
+        payload.pop("global_step", None)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")
 
-        global_step = int(payload["global_step"])
-        logical_step = max(global_step, 1)
+        steps = int(payload["steps"])
+        logical_step = max(steps, 1)
         should_log = ("train_runtime" in payload) or (
             self.terminal_log_every > 0 and logical_step % self.terminal_log_every == 0
         )
         if not should_log:
             return
 
-        self._log_to_wandb(payload, global_step=global_step)
+        self._log_to_wandb(payload, steps=steps)
 
         if "reward" in payload:
             LOGGER.info(
                 format_terminal_log(
                     "train",
                     [
-                        ("global_step", global_step),
+                        ("steps", steps),
                         ("reward", f"{float(payload.get('reward', 0.0)):.3f}"),
                     ],
                     color_code="32",

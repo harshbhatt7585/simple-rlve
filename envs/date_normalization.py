@@ -98,6 +98,12 @@ def parse_args() -> argparse.Namespace:
         help="Compute dtype used by 4-bit kernels (auto picks bf16/fp16/fp32 from hardware).",
     )
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--log_after_every",
+        type=int,
+        default=1,
+        help="Log rollout progress every N rollout steps.",
+    )
     p.add_argument("--terminal_log_every", type=int, default=1)
     p.add_argument("--sample_log_every", type=int, default=1)
     p.add_argument("--wandb", action="store_true")
@@ -269,12 +275,14 @@ class DateExtractionRewardLogger:
         trajectory_reward: list[float] | None = None,
         trajectory_done: list[bool] | None = None,
         trajectory_turns: list[int] | None = None,
+        steps: list[int] | None = None,
         global_step: list[int] | None = None,
         trainer_state=None,
         **_: Any,
     ) -> list[float]:
         rewards: list[float] = []
-        rollout_global_step = (
+        rollout_steps = (
+            int(steps[0]) if steps is not None and len(steps) > 0 else
             int(global_step[0]) if global_step is not None and len(global_step) > 0 else
             (int(trainer_state.global_step) if trainer_state is not None else -1)
         )
@@ -329,7 +337,7 @@ class DateExtractionRewardLogger:
 
             log_record = {
                 "episode_id": self.episode_id,
-                "global_step": rollout_global_step,
+                "steps": rollout_steps,
                 "question": q,
                 "expected_date": expected_norm,
                 "predicted_date": predicted_norm,
@@ -350,17 +358,17 @@ class DateExtractionRewardLogger:
             reward_mean = sum(rewards) / batch_size
             json_valid_rate = json_valid_count / batch_size
             accuracy = correct_count / batch_size
-            logical_global_step = max(rollout_global_step, 0)
+            logical_steps = max(rollout_steps, 0)
             done_rate = (trajectory_done_count / batch_size) if has_trajectory_done else None
             avg_turns = (trajectory_turn_sum / batch_size) if has_trajectory_turns else None
 
-            if self.terminal_log_every > 0 and (logical_global_step + 1) % self.terminal_log_every == 0:
+            if self.terminal_log_every > 0 and (logical_steps + 1) % self.terminal_log_every == 0:
                 if done_rate is not None and avg_turns is not None:
                     LOGGER.info(
                         format_terminal_log(
                             "episode",
                             [
-                                ("global_step", rollout_global_step),
+                                ("steps", rollout_steps),
                                 ("reward", f"{reward_mean:.3f}"),
                                 ("json", f"{json_valid_rate * 100.0:.1f}%"),
                                 ("acc", f"{accuracy * 100.0:.1f}%"),
@@ -375,7 +383,7 @@ class DateExtractionRewardLogger:
                         format_terminal_log(
                             "episode",
                             [
-                                ("global_step", rollout_global_step),
+                                ("steps", rollout_steps),
                                 ("reward", f"{reward_mean:.3f}"),
                                 ("json", f"{json_valid_rate * 100.0:.1f}%"),
                                 ("acc", f"{accuracy * 100.0:.1f}%"),
@@ -384,7 +392,7 @@ class DateExtractionRewardLogger:
                         )
                     )
 
-                if self.sample_log_every > 0 and (logical_global_step + 1) % self.sample_log_every == 0:
+                if self.sample_log_every > 0 and (logical_steps + 1) % self.sample_log_every == 0:
                     for record in sample_records:
                         LOGGER.info(
                             format_terminal_log(
@@ -511,9 +519,19 @@ class DateNormalizationEnv:
 class MultiTurnGRPOTrainer(GRPOTrainer):
     """GRPO trainer with explicit environment rollouts over multiple turns."""
 
-    def __init__(self, *args, rollout_env: DateNormalizationEnv, max_rollout_turns: int = MAX_ROLLOUT_TURNS, **kwargs):
+    def __init__(
+        self,
+        *args,
+        rollout_env: DateNormalizationEnv,
+        max_rollout_turns: int = MAX_ROLLOUT_TURNS,
+        rollout_log_every: int = 1,
+        rollout_sample_chars: int = 120,
+        **kwargs,
+    ):
         self.rollout_env = rollout_env
         self.max_rollout_turns = max(1, int(max_rollout_turns))
+        self.rollout_log_every = max(0, int(rollout_log_every))
+        self.rollout_sample_chars = max(40, int(rollout_sample_chars))
         self.global_rollout_step = 0
         super().__init__(*args, **kwargs)
 
@@ -581,6 +599,22 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
                 action_text = self.processing_class.decode(last_completion_ids, skip_special_tokens=True)
                 transition = self.rollout_env.step(action_text)
                 self.global_rollout_step += 1
+                if self.rollout_log_every > 0 and self.global_rollout_step % self.rollout_log_every == 0:
+                    LOGGER.info(
+                        format_terminal_log(
+                            "rollout",
+                            [
+                                ("steps", self.global_rollout_step),
+                                ("turn", turn_idx + 1),
+                                ("reward", f"{float(transition['reward']):.3f}"),
+                                ("done", bool(transition["done"])),
+                                ("expected", transition.get("ground_truth")),
+                                ("predicted", transition.get("output")),
+                                ("text", _clip_text(action_text, self.rollout_sample_chars)),
+                            ],
+                            color_code="90",
+                        )
+                    )
                 total_reward += float(transition["reward"])
                 done = bool(transition["done"])
                 if done:
@@ -601,12 +635,12 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
                 logprobs.append(self._align_logprobs(last_logprobs, last_completion_ids))
 
         mode = "train" if self.model.training else "eval"
-        self._metrics[mode]["global_step"].append(float(self.global_rollout_step))
+        self._metrics[mode]["steps"].append(float(self.global_rollout_step))
         extra_fields = {
             "trajectory_reward": trajectory_reward,
             "trajectory_done": trajectory_done,
             "trajectory_turns": trajectory_turns,
-            "global_step": self.global_rollout_step,
+            "steps": self.global_rollout_step,
         }
         return prompt_ids, completion_ids, logprobs, extra_fields
 
@@ -741,16 +775,18 @@ def main():
         peft_config=make_lora_config(),
         rollout_env=env,
         max_rollout_turns=MAX_ROLLOUT_TURNS,
+        rollout_log_every=args.log_after_every,
     )
     trainer.remove_callback(ProgressCallback)
     trainer.remove_callback(PrinterCallback)
 
     LOGGER.info(
-        "Starting training | device=%s bf16=%s 4bit=%s max_rollout_turns=%s",
+        "Starting training | device=%s bf16=%s 4bit=%s max_rollout_turns=%s log_after_every=%s",
         args.device,
         use_bf16,
         args.load_in_4bit,
         MAX_ROLLOUT_TURNS,
+        args.log_after_every,
     )
     trainer.train()
 
