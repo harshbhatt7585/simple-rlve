@@ -209,7 +209,7 @@ class EpisodeRewardLogger:
             if self.terminal_log_every > 0 and (logical_step + 1) % self.terminal_log_every == 0:
                 LOGGER.info(
                     (
-                        "episode_stats step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
+                        "episode_stats global_step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
                         "| acc=%.1f%% | format=%.1f%%"
                     ),
                     step,
@@ -263,8 +263,40 @@ class MetricsJSONLCallback(TrainerCallback):
         self.path = path
         self.max_steps = max_steps
         self.terminal_log_every = max(0, terminal_log_every)
+        self._wandb_metrics_initialized = False
+        self._last_rollout_global_step = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text("")
+
+    def _log_to_wandb(self, payload: dict[str, Any], global_step: int) -> None:
+        try:
+            import wandb
+        except Exception:
+            return
+
+        run = getattr(wandb, "run", None)
+        if run is None:
+            return
+
+        if not self._wandb_metrics_initialized:
+            try:
+                wandb.define_metric("global_step")
+                wandb.define_metric("reward", step_metric="global_step")
+                wandb.define_metric("entropy", step_metric="global_step")
+                wandb.define_metric("completions/mean_length", step_metric="global_step")
+                wandb.define_metric("step_time", step_metric="global_step")
+            except Exception:
+                pass
+            self._wandb_metrics_initialized = True
+
+        wandb_payload = {
+            key: value for key, value in payload.items() if isinstance(value, (int, float))
+        }
+        wandb_payload["global_step"] = global_step
+        try:
+            run.log(wandb_payload, step=global_step)
+        except Exception:
+            pass
 
     def on_log(self, args, state, control, logs=None, **kwargs):  # noqa: ANN001
         if not state.is_local_process_zero or not logs:
@@ -276,27 +308,40 @@ class MetricsJSONLCallback(TrainerCallback):
             if isinstance(v, (int, float, str)) and k not in excluded_keys
         }
         payload = {"global_step": int(state.global_step), "epoch": float(state.epoch or 0.0), **numeric_logs}
+        if "global_step" in numeric_logs:
+            try:
+                self._last_rollout_global_step = int(float(numeric_logs["global_step"]))
+            except Exception:
+                pass
+        elif self._last_rollout_global_step > 0:
+            payload["global_step"] = self._last_rollout_global_step
+        else:
+            payload["global_step"] = int(state.global_step)
+
+        try:
+            payload["global_step"] = int(float(payload["global_step"]))
+        except Exception:
+            payload["global_step"] = int(self._last_rollout_global_step or state.global_step)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")
 
-        step = int(payload["global_step"])
-        logical_step = max(step, 1)
+        global_step = int(payload["global_step"])
+        logical_step = max(global_step, 1)
         should_log = ("train_runtime" in payload) or (
             self.terminal_log_every > 0 and logical_step % self.terminal_log_every == 0
         )
         if not should_log:
             return
 
+        self._log_to_wandb(payload, global_step=global_step)
+
         if "reward" in payload:
-            progress = f"{step}/{self.max_steps}" if self.max_steps > 0 else str(step)
-            progress_pct = (100.0 * step / self.max_steps) if self.max_steps > 0 else 0.0
             LOGGER.info(
                 (
-                    "train step=%s (%.1f%%) | reward=%.3f | "
+                    "train global_step=%s | reward=%.3f | "
                     "entropy=%.3f | comp_len=%.1f | step_time=%.2fs"
                 ),
-                progress,
-                progress_pct,
+                global_step,
                 float(payload.get("reward", 0.0)),
                 float(payload.get("entropy", 0.0)),
                 float(payload.get("completions/mean_length", 0.0)),

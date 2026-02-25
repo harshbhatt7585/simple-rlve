@@ -269,13 +269,22 @@ class DateExtractionRewardLogger:
         trajectory_reward: list[float] | None = None,
         trajectory_done: list[bool] | None = None,
         trajectory_turns: list[int] | None = None,
+        global_step: list[int] | None = None,
         trainer_state=None,
         **_: Any,
     ) -> list[float]:
         rewards: list[float] = []
-        step = int(trainer_state.global_step) if trainer_state is not None else -1
+        rollout_global_step = (
+            int(global_step[0]) if global_step is not None and len(global_step) > 0 else
+            (int(trainer_state.global_step) if trainer_state is not None else -1)
+        )
         json_valid_count = 0
         correct_count = 0
+        trajectory_done_count = 0
+        trajectory_turn_sum = 0
+        trajectory_turn_max = 0
+        has_trajectory_done = trajectory_done is not None
+        has_trajectory_turns = trajectory_turns is not None
         sample_records: list[dict[str, Any]] = []
 
         for idx, (prompt, completion, expected, q) in enumerate(zip(prompts, completions, answer, question, strict=True)):
@@ -284,6 +293,8 @@ class DateExtractionRewardLogger:
             json_valid, json_date_raw = _extract_json_date(completion_text)
             predicted_norm = _normalize_date(json_date_raw) if json_valid else None
             is_correct = expected_norm is not None and predicted_norm == expected_norm
+            rollout_done = bool(trajectory_done[idx]) if has_trajectory_done and idx < len(trajectory_done) else None
+            rollout_turns = int(trajectory_turns[idx]) if has_trajectory_turns and idx < len(trajectory_turns) else None
 
             if trajectory_reward is not None and idx < len(trajectory_reward):
                 total_reward = float(trajectory_reward[idx])
@@ -298,6 +309,11 @@ class DateExtractionRewardLogger:
             rewards.append(total_reward)
             json_valid_count += int(json_valid)
             correct_count += int(is_correct)
+            if rollout_done is not None:
+                trajectory_done_count += int(rollout_done)
+            if rollout_turns is not None:
+                trajectory_turn_sum += rollout_turns
+                trajectory_turn_max = max(trajectory_turn_max, rollout_turns)
 
             if len(sample_records) < self.prediction_log_count:
                 sample_records.append(
@@ -307,20 +323,22 @@ class DateExtractionRewardLogger:
                         "predicted_date": predicted_norm,
                         "json_valid": json_valid,
                         "reward": total_reward,
+                        "trajectory_done": rollout_done,
+                        "trajectory_turns": rollout_turns,
                         "completion": completion_text,
                     }
                 )
 
             log_record = {
                 "episode_id": self.episode_id,
-                "global_step": step,
+                "global_step": rollout_global_step,
                 "question": q,
                 "expected_date": expected_norm,
                 "predicted_date": predicted_norm,
                 "json_valid": json_valid,
                 "is_correct": is_correct,
-                "trajectory_done": trajectory_done[idx] if trajectory_done is not None and idx < len(trajectory_done) else None,
-                "trajectory_turns": trajectory_turns[idx] if trajectory_turns is not None and idx < len(trajectory_turns) else None,
+                "trajectory_done": rollout_done,
+                "trajectory_turns": rollout_turns,
                 "total_reward": total_reward,
                 "prompt": _as_text(prompt),
                 "completion": completion_text,
@@ -336,29 +354,54 @@ class DateExtractionRewardLogger:
             reward_max = max(rewards)
             json_valid_rate = json_valid_count / batch_size
             accuracy = correct_count / batch_size
-            logical_step = max(step, 0)
+            logical_global_step = max(rollout_global_step, 0)
+            done_rate = (trajectory_done_count / batch_size) if has_trajectory_done else None
+            avg_turns = (trajectory_turn_sum / batch_size) if has_trajectory_turns else None
 
-            if self.terminal_log_every > 0 and (logical_step + 1) % self.terminal_log_every == 0:
-                LOGGER.info(
-                    (
-                        "episode_stats step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
-                        "| json_valid=%.1f%% | date_acc=%.1f%%"
-                    ),
-                    step,
-                    reward_mean,
-                    reward_min,
-                    reward_max,
-                    json_valid_rate * 100.0,
-                    accuracy * 100.0,
-                )
-                if self.sample_log_every > 0 and (logical_step + 1) % self.sample_log_every == 0:
+            if self.terminal_log_every > 0 and (logical_global_step + 1) % self.terminal_log_every == 0:
+                if done_rate is not None and avg_turns is not None:
+                    LOGGER.info(
+                        (
+                            "episode_stats global_step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
+                            "| json_valid=%.1f%% | date_acc=%.1f%% | done=%.1f%% | turns(avg=%.2f max=%d)"
+                        ),
+                        rollout_global_step,
+                        reward_mean,
+                        reward_min,
+                        reward_max,
+                        json_valid_rate * 100.0,
+                        accuracy * 100.0,
+                        done_rate * 100.0,
+                        avg_turns,
+                        trajectory_turn_max,
+                    )
+                else:
+                    LOGGER.info(
+                        (
+                            "episode_stats global_step=%s | reward(mean=%.3f min=%.3f max=%.3f) "
+                            "| json_valid=%.1f%% | date_acc=%.1f%%"
+                        ),
+                        rollout_global_step,
+                        reward_mean,
+                        reward_min,
+                        reward_max,
+                        json_valid_rate * 100.0,
+                        accuracy * 100.0,
+                    )
+
+                if self.sample_log_every > 0 and (logical_global_step + 1) % self.sample_log_every == 0:
                     for record in sample_records:
                         LOGGER.info(
-                            "prediction | reward=%.3f | json_valid=%s | expected=%s predicted=%s | text=%s",
+                            (
+                                "prediction | reward=%.3f | json_valid=%s | expected=%s predicted=%s "
+                                "| done=%s turns=%s | text=%s"
+                            ),
                             float(record["reward"]),
                             record["json_valid"],
                             record["expected_date"],
                             record["predicted_date"],
+                            record["trajectory_done"],
+                            record["trajectory_turns"],
                             _clip_text(str(record["completion"]), self.sample_chars),
                         )
 
@@ -474,6 +517,7 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
     def __init__(self, *args, rollout_env: DateNormalizationEnv, max_rollout_turns: int = MAX_ROLLOUT_TURNS, **kwargs):
         self.rollout_env = rollout_env
         self.max_rollout_turns = max(1, int(max_rollout_turns))
+        self.global_rollout_step = 0
         super().__init__(*args, **kwargs)
 
     @staticmethod
@@ -539,6 +583,7 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
 
                 action_text = self.processing_class.decode(last_completion_ids, skip_special_tokens=True)
                 transition = self.rollout_env.step(action_text)
+                self.global_rollout_step += 1
                 total_reward += float(transition["reward"])
                 done = bool(transition["done"])
                 if done:
@@ -558,10 +603,13 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
             if logprobs is not None:
                 logprobs.append(self._align_logprobs(last_logprobs, last_completion_ids))
 
+        mode = "train" if self.model.training else "eval"
+        self._metrics[mode]["global_step"].append(float(self.global_rollout_step))
         extra_fields = {
             "trajectory_reward": trajectory_reward,
             "trajectory_done": trajectory_done,
             "trajectory_turns": trajectory_turns,
+            "global_step": self.global_rollout_step,
         }
         return prompt_ids, completion_ids, logprobs, extra_fields
 
