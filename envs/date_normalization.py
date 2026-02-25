@@ -524,43 +524,75 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
         super().__init__(*args, **kwargs)
 
     @staticmethod
-    def _retry_feedback(transition: dict[str, Any]) -> str:
+    def _retry_feedback_payload(transition: dict[str, Any]) -> dict[str, Any]:
         expected = transition.get("ground_truth")
         predicted = transition.get("output")
 
         if predicted is None:
-            return "Previous output had no parseable date."
+            return {"feedback_type": "no_date", "wrong_components": ["all"]}
         if not bool(transition.get("format_ok", False)):
-            return 'Format invalid: output must be exactly one JSON object {"date":"YYYY-MM-DD"}.'
+            return {"feedback_type": "format_invalid", "wrong_components": ["all"]}
 
         wrong_parts = _wrong_date_components(
             expected if isinstance(expected, str) else None,
             predicted if isinstance(predicted, str) else None,
         )
-        if len(wrong_parts) == 3:
-            wrong_hint = "all"
-        elif len(wrong_parts) == 1:
-            wrong_hint = wrong_parts[0]
-        else:
-            wrong_hint = ", ".join(wrong_parts)
-        return f"Date arithmetic incorrect. Wrong component(s): {wrong_hint}."
+        return {"feedback_type": "wrong_date", "wrong_components": wrong_parts}
 
-    def _next_turn_prompt(
-        self,
-        base_prompt: str,
-        turn_idx: int,
-        transition: dict[str, Any],
-    ) -> str:
-        feedback = self._retry_feedback(transition)
-        previous_date = transition.get("output")
-        if previous_date is None:
-            previous_date = "null"
+    def _user_turn_content(self, question: str, transition: dict[str, Any] | None = None) -> str:
+        if transition is None:
+            payload = {
+                "task": "normalize_date",
+                "sentence": question,
+                "previous_parsed_date": None,
+                "previous_format_ok": None,
+                "feedback_type": "initial",
+                "wrong_components": [],
+                "response_schema": {"date": "YYYY-MM-DD"},
+            }
+        else:
+            feedback_payload = self._retry_feedback_payload(transition)
+            payload = {
+                "task": "normalize_date",
+                "sentence": question,
+                "previous_parsed_date": transition.get("output"),
+                "previous_format_ok": transition.get("format_ok"),
+                "feedback_type": feedback_payload["feedback_type"],
+                "wrong_components": feedback_payload["wrong_components"],
+                "response_schema": {"date": "YYYY-MM-DD"},
+            }
+
         return (
-            f"{base_prompt}\n\n"
-            f"Previous parsed date: {previous_date}\n"
-            f"Correction: {feedback}\n"
-            'Return exactly: {"date":"YYYY-MM-DD"}'
+            "STATE_JSON:\n"
+            f"{json.dumps(payload, ensure_ascii=True)}\n"
+            'Return exactly one JSON object: {"date":"YYYY-MM-DD"}'
         )
+
+    def _base_chat_messages(self, question: str) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": PROMPT_TEMPLATE.strip()},
+            {
+                "role": "user",
+                "content": self._user_turn_content(question=question, transition=None),
+            },
+        ]
+
+    @staticmethod
+    def _assistant_retry_summary(transition: dict[str, Any]) -> str:
+        predicted = transition.get("output")
+        if predicted is None:
+            return '{"date":"INVALID"}'
+        return json.dumps({"date": predicted}, ensure_ascii=True)
+
+    def _next_turn_user_message(
+        self,
+        question: str,
+        transition: dict[str, Any],
+    ) -> dict[str, str]:
+        return {
+            "role": "user",
+            "content": self._user_turn_content(question=question, transition=transition),
+        }
 
     @staticmethod
     def _align_logprobs(logprobs: list[float] | None, completion_ids: list[int]) -> list[float]:
@@ -583,8 +615,7 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
         for raw_prompt in prompts:
             prompt_text = _as_text(raw_prompt)
             current_message = self.rollout_env.reset(prompt=prompt_text)
-            base_prompt = current_message.prompt
-            current_prompt = base_prompt
+            current_prompt: list[dict[str, str]] = self._base_chat_messages(current_message.question)
 
             total_reward = 0.0
             done = False
@@ -627,11 +658,10 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
                 done = bool(transition["done"])
                 if done:
                     break
-                current_prompt = self._next_turn_prompt(
-                    base_prompt=base_prompt,
-                    turn_idx=turn_idx,
-                    transition=transition,
-                )
+                current_prompt = current_prompt + [
+                    {"role": "assistant", "content": self._assistant_retry_summary(transition)},
+                    self._next_turn_user_message(question=current_message.question, transition=transition),
+                ]
 
             prompt_ids.append(last_prompt_ids)
             completion_ids.append(last_completion_ids)
