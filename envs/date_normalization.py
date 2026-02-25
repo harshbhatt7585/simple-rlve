@@ -250,15 +250,11 @@ class DateExtractionRewardLogger:
         self,
         log_path: Path,
         log_after_every: int = 1,
-        sample_chars: int = 160,
-        prediction_log_count: int = 1,
     ) -> None:
         self.log_path = log_path
         self.episode_id = 0
         self.__name__ = "date_extraction_reward"
         self.log_after_every = max(0, log_after_every)
-        self.sample_chars = max(40, sample_chars)
-        self.prediction_log_count = max(1, prediction_log_count)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text("")
 
@@ -288,7 +284,6 @@ class DateExtractionRewardLogger:
         trajectory_turn_sum = 0
         has_trajectory_done = trajectory_done is not None
         has_trajectory_turns = trajectory_turns is not None
-        sample_records: list[dict[str, Any]] = []
 
         for idx, (prompt, completion, expected, q) in enumerate(zip(prompts, completions, answer, question, strict=True)):
             completion_text = _as_text(completion)
@@ -316,20 +311,6 @@ class DateExtractionRewardLogger:
                 trajectory_done_count += int(rollout_done)
             if rollout_turns is not None:
                 trajectory_turn_sum += rollout_turns
-
-            if len(sample_records) < self.prediction_log_count:
-                sample_records.append(
-                    {
-                        "question": q,
-                        "expected_date": expected_norm,
-                        "predicted_date": predicted_norm,
-                        "json_valid": json_valid,
-                        "reward": total_reward,
-                        "trajectory_done": rollout_done,
-                        "trajectory_turns": rollout_turns,
-                        "completion": completion_text,
-                    }
-                )
 
             log_record = {
                 "episode_id": self.episode_id,
@@ -387,24 +368,6 @@ class DateExtractionRewardLogger:
                             color_code="34",
                         )
                     )
-
-                if self.prediction_log_count > 0:
-                    for record in sample_records:
-                        LOGGER.info(
-                            format_terminal_log(
-                                "sample",
-                                [
-                                    ("reward", f"{float(record['reward']):.3f}"),
-                                    ("expected", record["expected_date"]),
-                                    ("predicted", record["predicted_date"]),
-                                    ("json", record["json_valid"]),
-                                    ("done", record["trajectory_done"]),
-                                    ("turns", record["trajectory_turns"]),
-                                    ("text", _clip_text(str(record["completion"]), self.sample_chars)),
-                                ],
-                                color_code="35",
-                            )
-                        )
 
         return rewards
 
