@@ -433,13 +433,18 @@ class DateNormalizationEnv:
         format_ok, json_date = _extract_json_response(_as_text(action))
         output = _normalize_date(json_date) if json_date is not None else None
 
+
         if output is None:
             reward = -0.5
         elif output == ground_truth:
             reward = 1.0 if format_ok else 0.5
             self.done = True
+            self.current_step += 1
         else:
             reward = -0.25 if format_ok else -0.5
+        
+        print(output, ground_truth, output == ground_truth, self.done)
+
 
         return {
             "output": output,
