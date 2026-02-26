@@ -71,16 +71,6 @@ Output requirements:
 - Return JSON only.
 - No explanation, no markdown, no extra keys.
 - Use this exact schema: {"date":"YYYY-MM-DD"}
-
-Examples:
-Sentence: The Berlin Wall fell on November 9, 1989, and I visited a week later.
-Output: {"date":"1989-11-16"}
-
-Sentence: The flight crew training started two days prior to the new route launch on March 1, 2004.
-Output: {"date":"2004-02-28"}
-
-Sentence: The train to Amsterdam offered free Wi-Fi starting the Monday after October 1, 2015.
-Output: {"date":"2015-10-05"}
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -88,7 +78,7 @@ ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--model_name", default="Qwen/Qwen2.5-0.5B-Instruct")
+    p.add_argument("--model_name", default="meta-llama/Llama-3.2-1B-Instruct")
     p.add_argument("--output_dir", default="rlvr_outputs/date_normalization")
     p.add_argument("--num_episodes", type=int, default=256)
     p.add_argument("--max_steps", type=int, default=60)
