@@ -543,7 +543,7 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
         return (
             "STATE_JSON:\n"
             f"{json.dumps(payload, ensure_ascii=True)}\n"
-            'Return exactly one JSON object: {"date":"YYYY-MM-DD"}'
+            'Try again to find the accurate date.'
         )
 
     def _base_chat_messages(self, question: str) -> list[dict[str, str]]:
