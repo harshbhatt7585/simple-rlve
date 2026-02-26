@@ -442,9 +442,7 @@ class DateNormalizationEnv:
             self.current_step += 1
         else:
             reward = -0.25 if format_ok else -0.5
-        
-        print(output, ground_truth, output == ground_truth, self.done)
-
+    
 
         return {
             "output": output,
@@ -628,12 +626,12 @@ class MultiTurnGRPOTrainer(GRPOTrainer):
                         format_terminal_log(
                             "rollout",
                             [
-                                # ("steps", self.global_rollout_step),
-                                # ("turn", turn_idx + 1),
-                                # ("reward", f"{float(transition['reward']):.3f}"),
-                                # ("done", bool(transition["done"])),
+                                ("steps", self.global_rollout_step),
+                                ("turn", turn_idx + 1),
+                                ("reward", f"{float(transition['reward']):.3f}"),
+                                ("done", bool(transition["done"])),
                                 ("expected", transition.get("ground_truth")),
-                                # ("predicted", predicted_display),
+                                ("predicted", predicted_display),
                                 ("text", _clip_text(action_text, self.rollout_sample_chars)),
                             ],
                             color_code="90",
