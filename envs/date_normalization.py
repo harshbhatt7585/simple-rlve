@@ -262,7 +262,7 @@ def build_training_dataset(num_episodes: int, seed: int) -> Dataset:
     return Dataset.from_list(rows)
 
 
-class DateExtractionRewardLogger:
+class DateExtractionRewardFunction:
     """Reward function with strict JSON parsing and date correctness checks."""
 
     def __init__(
@@ -290,6 +290,8 @@ class DateExtractionRewardLogger:
         step = int(trainer_state.global_step) if trainer_state is not None else -1
         json_valid_count = 0
         correct_count = 0
+        sample_expected: str | None = None
+        sample_predicted: str | None = None
 
         for prompt, completion, expected, q in zip(prompts, completions, answer, question, strict=True):
             completion_text = _as_text(completion)
@@ -308,6 +310,9 @@ class DateExtractionRewardLogger:
             rewards.append(total_reward)
             json_valid_count += int(json_valid)
             correct_count += int(is_correct)
+            if sample_expected is None:
+                sample_expected = expected_norm
+                sample_predicted = predicted_norm
 
             log_record = {
                 "episode_id": self.episode_id,
@@ -340,6 +345,8 @@ class DateExtractionRewardLogger:
                             ("reward", f"{reward_mean:.3f}"),
                             ("json", f"{json_valid_rate * 100.0:.1f}%"),
                             ("acc", f"{accuracy * 100.0:.1f}%"),
+                            ("expected", sample_expected),
+                            ("predicted", sample_predicted if sample_predicted is not None else "null"),
                         ],
                         color_code="34",
                     )
@@ -422,7 +429,7 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    reward_fn = DateExtractionRewardLogger(
+    reward_fn = DateExtractionRewardFunction(
         output_dir / "episode_rewards.jsonl",
         log_after_every=args.log_after_every,
     )
