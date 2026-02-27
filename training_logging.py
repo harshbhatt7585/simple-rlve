@@ -343,32 +343,38 @@ class MetricsJSONLCallback(TrainerCallback):
             for k, v in logs.items()
             if isinstance(v, (int, float, str)) and k not in excluded_keys
         }
-        payload = {"steps": int(state.global_step), "epoch": float(state.epoch or 0.0), **numeric_logs}
+        trainer_steps = int(state.global_step)
+        payload = {"steps": trainer_steps, "epoch": float(state.epoch or 0.0), **numeric_logs}
+
+        rollout_candidate: int | None = None
         if "steps" in numeric_logs:
             try:
-                self._last_rollout_steps = int(float(numeric_logs["steps"]))
+                rollout_candidate = int(float(numeric_logs["steps"]))
             except Exception:
-                pass
+                rollout_candidate = None
         elif "global_step" in numeric_logs:
             try:
-                self._last_rollout_steps = int(float(numeric_logs["global_step"]))
-                payload["steps"] = self._last_rollout_steps
+                rollout_candidate = int(float(numeric_logs["global_step"]))
             except Exception:
-                pass
+                rollout_candidate = None
+
+        if rollout_candidate is not None:
+            # Prefer rollout/global-step semantics when they move faster than trainer global_step,
+            # but never let a stale low value (e.g., always 1) pin the terminal step counter.
+            payload["steps"] = max(trainer_steps, rollout_candidate, self._last_rollout_steps)
         elif self._last_rollout_steps > 0:
-            payload["steps"] = self._last_rollout_steps
+            payload["steps"] = max(trainer_steps, self._last_rollout_steps)
         else:
-            payload["steps"] = int(state.global_step)
+            payload["steps"] = trainer_steps
 
         try:
             payload["steps"] = int(float(payload["steps"]))
         except Exception:
-            payload["steps"] = int(self._last_rollout_steps or state.global_step)
+            payload["steps"] = int(max(self._last_rollout_steps, trainer_steps))
 
         if payload["steps"] < self._last_rollout_steps:
             payload["steps"] = self._last_rollout_steps
-        else:
-            self._last_rollout_steps = payload["steps"]
+        self._last_rollout_steps = payload["steps"]
 
         payload.pop("global_step", None)
         with self.path.open("a", encoding="utf-8") as f:
