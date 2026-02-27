@@ -46,6 +46,14 @@ def configure_external_logs(show_external_logs: bool = False) -> None:
         "ignore",
         message=r"Could not find a config file in .* - will assume that the vocabulary was not modified\.",
     )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Merge lora module to 4-bit linear may get different generations due to rounding errors\.",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Unmerge lora module to 4-bit linear may get different generations due to rounding errors\.",
+    )
 
     # Silence hub/http informational request logs.
     for logger_name in (
@@ -279,8 +287,11 @@ class EpisodeRewardLogger:
                     payload["episode/prediction_reward"] = float(sample_records[0]["reward"])
                     payload["episode/predicted_answer"] = str(sample_records[0]["predicted_answer"])
                     payload["episode/expected_answer"] = str(sample_records[0]["expected_answer"])
+                payload["episode/rollout_steps"] = wandb_step
                 try:
-                    self.wandb_run.log(payload, step=wandb_step)
+                    # Do not pass explicit `step` because trainer integrations may already advance
+                    # internal wandb steps, which can trigger out-of-order warnings.
+                    self.wandb_run.log(payload)
                 except Exception:
                     pass
 
@@ -330,7 +341,8 @@ class MetricsJSONLCallback(TrainerCallback):
         if "reward" in payload:
             wandb_payload["/train/reward"] = float(payload["reward"])
         try:
-            run.log(wandb_payload, step=steps)
+            # Keep custom x-axis in payload while letting wandb own internal `_step`.
+            run.log(wandb_payload)
         except Exception:
             pass
 

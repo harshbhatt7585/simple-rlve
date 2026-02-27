@@ -73,6 +73,7 @@ Output requirements:
 - Use this exact schema: {"date":"YYYY-MM-DD"}
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
+DATE_FIELD_PATTERN = re.compile(r'"date"\s*:\s*"([^"]+)"', re.IGNORECASE)
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -122,14 +123,18 @@ class Episode:
 
 
 def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
     if isinstance(value, str):
         return value
     if isinstance(value, list):
-        if value and isinstance(value[0], dict):
-            return str(value[0].get("content", ""))
-        return " ".join(str(x) for x in value)
+        return " ".join(part for part in (_as_text(x) for x in value) if part).strip()
     if isinstance(value, dict):
-        return str(value.get("content", ""))
+        if "content" in value:
+            return _as_text(value.get("content"))
+        if "text" in value:
+            return _as_text(value.get("text"))
+        return " ".join(part for part in (_as_text(x) for x in value.values()) if part).strip()
     return str(value)
 
 
@@ -213,14 +218,21 @@ def _extract_json_response(completion_text: str) -> tuple[bool, str | None]:
 
     try:
         data = json.loads(raw)
-        if (
-            isinstance(data, dict)
-            and set(data.keys()) == {"date"}
-            and isinstance(data.get("date"), str)
-        ):
-            return True, data["date"].strip()
+        if isinstance(data, dict) and isinstance(data.get("date"), str):
+            date_text = data["date"].strip()
+            return (set(data.keys()) == {"date"}), date_text
     except Exception:
         pass
+
+    date_field_candidates = [m.group(1).strip() for m in DATE_FIELD_PATTERN.finditer(raw)]
+    for candidate in reversed(date_field_candidates):
+        if _normalize_date(candidate) is not None:
+            return False, candidate
+
+    date_value_candidates = DATE_VALUE_PATTERN.findall(raw)
+    for candidate in reversed(date_value_candidates):
+        if _normalize_date(candidate) is not None:
+            return False, candidate
 
     return False, None
 
