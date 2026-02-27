@@ -304,7 +304,6 @@ class DateExtractionRewardFunction:
         if rewards:
             reward_mean = sum(rewards) / len(rewards)
             json_rate = json_valid_count / len(rewards)
-            acc = correct_count / len(rewards)
             logical_step = max(step, 0)
             if self.log_after_every > 0 and (logical_step + 1) % self.log_after_every == 0:
                 LOGGER.info(
