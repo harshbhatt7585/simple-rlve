@@ -250,7 +250,7 @@ class DateExtractionRewardFunction:
                 completion_text = str(completion[0].get("content", ""))
             else:
                 completion_text = str(completion)
-            expected_norm = _normalize_date(expected)
+            expected_norm = str(expected).strip() if expected is not None else None
             json_valid, json_date_raw = _extract_json_response(completion_text)
 
             if json_valid:
