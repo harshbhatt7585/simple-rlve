@@ -249,12 +249,29 @@ class DateExtractionRewardFunction:
 
             if json_valid:
                 strict_predicted = _normalize_date(json_date_raw)
-                is_correct = expected_norm is not None and strict_predicted == expected_norm
-                reward = 1.0 if is_correct else 0.0
+                year_correct = False
+                month_correct = False
+                day_correct = False
+                if (
+                    expected_norm is not None
+                    and strict_predicted is not None
+                    and ISO_DATE_PATTERN.fullmatch(expected_norm)
+                    and ISO_DATE_PATTERN.fullmatch(strict_predicted)
+                ):
+                    exp_year, exp_month, exp_day = expected_norm.split("-")
+                    pred_year, pred_month, pred_day = strict_predicted.split("-")
+                    year_correct = exp_year == pred_year
+                    month_correct = exp_month == pred_month
+                    day_correct = exp_day == pred_day
+                reward = (int(year_correct) + int(month_correct) + int(day_correct)) / 3.0
+                is_correct = year_correct and month_correct and day_correct
             else:
                 strict_predicted = None
                 is_correct = False
                 reward = -0.25
+                year_correct = False
+                month_correct = False
+                day_correct = False
 
             logged_predicted = strict_predicted if strict_predicted is not None else _normalize_date(completion_text)
 
@@ -272,6 +289,9 @@ class DateExtractionRewardFunction:
                 "expected_date": expected_norm,
                 "predicted_date": logged_predicted,
                 "json_valid": json_valid,
+                "year_correct": year_correct,
+                "month_correct": month_correct,
+                "day_correct": day_correct,
                 "is_correct": is_correct,
                 "total_reward": reward,
                 "prompt": str(prompt),
