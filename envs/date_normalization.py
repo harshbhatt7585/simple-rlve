@@ -314,7 +314,6 @@ class DateExtractionRewardFunction:
                             ("steps", step),
                             ("reward", f"{reward_mean:.3f}"),
                             ("json", f"{json_rate * 100.0:.1f}%"),
-                            ("acc", f"{acc * 100.0:.1f}%"),
                             ("expected", sample_expected),
                             ("predicted", sample_predicted if sample_predicted is not None else "null"),
                         ],
