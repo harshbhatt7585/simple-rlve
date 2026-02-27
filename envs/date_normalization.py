@@ -71,7 +71,6 @@ Output requirements:
 - Return JSON only.
 - No explanation, no markdown, no extra keys.
 - Use this exact schema: {"date":"YYYY-MM-DD"}
-
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -99,19 +98,13 @@ def parse_args() -> argparse.Namespace:
         help="Compute dtype used by 4-bit kernels (auto picks bf16/fp16/fp32 from hardware).",
     )
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--log_after_every",
-        type=int,
-        default=1,
-        help="Log terminal progress every N trainer steps.",
-    )
+    p.add_argument("--log_after_every", type=int, default=1)
     p.add_argument("--wandb", action="store_true")
-
     return p.parse_args()
 
 
 @dataclass
-class Message:
+class Episode:
     prompt: str
     question: str
     answer: str
@@ -152,9 +145,9 @@ def _parse_date_candidate(candidate: str) -> datetime | None:
         "%B %d, %Y",
     )
     for fmt in formats:
-        for candidate_variant in (normalized, text):
+        for variant in (normalized, text):
             try:
-                return datetime.strptime(candidate_variant, fmt)
+                return datetime.strptime(variant, fmt)
             except ValueError:
                 continue
     return None
@@ -183,15 +176,10 @@ def _extract_json_response(completion_text: str) -> tuple[bool, str | None]:
 
     try:
         data = json.loads(raw)
-        if (
-            isinstance(data, dict)
-            and set(data.keys()) == {"date"}
-            and isinstance(data.get("date"), str)
-        ):
+        if isinstance(data, dict) and set(data.keys()) == {"date"} and isinstance(data.get("date"), str):
             return True, data["date"].strip()
     except Exception:
         pass
-
     return False, None
 
 
@@ -207,73 +195,57 @@ def _extract_expected_date(target_output: Any) -> str | None:
     if not isinstance(first, dict):
         return None
 
-    resolved_value = str(first.get("resolved_value", "")).strip() or None
-    if resolved_value is None or not ISO_DATE_PATTERN.fullmatch(resolved_value):
+    resolved_value = str(first.get("resolved_value", "")).strip()
+    if not ISO_DATE_PATTERN.fullmatch(resolved_value):
         return None
     return resolved_value
 
 
-def _extract_message(input_text: Any, target_output: Any) -> Message | None:
-    question = str(input_text).strip()
-    answer = _extract_expected_date(target_output)
-    if not question or answer is None:
-        return None
+class DateNormalizationEnv:
+    NAME = "date_normalization"
 
-    prompt = f"{PROMPT_TEMPLATE}\nSentence: {question}"
-    return Message(prompt=prompt, question=question, answer=answer)
+    def __init__(self, seed: int = 42):
+        self.rng = random.Random(seed)
+        self.split = self._load_split()
+        if len(self.split) == 0:
+            raise ValueError("Loaded dataset split is empty.")
 
+    @staticmethod
+    def _build_prompt(question: str) -> str:
+        return f"{PROMPT_TEMPLATE}\nSentence: {question}"
 
-def _load_dataset_split() -> Dataset:
-    DATASET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    dataset = load_dataset(DATASET_ID, cache_dir=str(DATASET_CACHE_DIR))
-    if isinstance(dataset, Dataset):
-        return dataset
-    for split_name in ("train", "validation", "test"):
-        if split_name in dataset:
-            return dataset[split_name]
-    return next(iter(dataset.values()))
+    def _load_split(self) -> Dataset:
+        DATASET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        dataset = load_dataset(DATASET_ID, cache_dir=str(DATASET_CACHE_DIR))
+        if isinstance(dataset, Dataset):
+            return dataset
+        for split_name in ("train", "validation", "test"):
+            if split_name in dataset:
+                return dataset[split_name]
+        return next(iter(dataset.values()))
 
+    def sample(self) -> Episode:
+        for _ in range(1024):
+            row = self.split[self.rng.randrange(len(self.split))]
+            question = str(row.get("input_text", "")).strip()
+            answer = _extract_expected_date(row.get("target_output"))
+            if question and answer is not None:
+                return Episode(prompt=self._build_prompt(question), question=question, answer=answer)
+        raise ValueError("Could not sample a valid date-normalization example from dataset.")
 
-def build_training_dataset(num_episodes: int, seed: int) -> Dataset:
-    rng = random.Random(seed)
-    split = _load_dataset_split()
-    total = len(split)
-    if total == 0:
-        raise ValueError("Loaded dataset split is empty.")
-
-    if num_episodes <= total:
-        indices = rng.sample(range(total), k=num_episodes)
-    else:
-        indices = [rng.randrange(total) for _ in range(num_episodes)]
-
-    rows: list[dict[str, str]] = []
-    for idx in indices:
-        row = split[int(idx)]
-        message = _extract_message(row["input_text"], row["target_output"])
-        if message is None:
-            continue
-        rows.append(vars(message))
-
-    if not rows:
-        raise ValueError(
-            "No valid rows were produced from the dataset. "
-            "Check source columns and date format normalization."
-        )
-    return Dataset.from_list(rows)
+    def build_dataset(self, n: int) -> Dataset:
+        rows = [vars(self.sample()) for _ in range(n)]
+        return Dataset.from_list(rows)
 
 
 class DateExtractionRewardFunction:
-    """Reward function with strict JSON parsing and date correctness checks."""
+    """Reward function with strict JSON checks and built-in logging."""
 
-    def __init__(
-        self,
-        log_path: Path,
-        log_after_every: int = 1,
-    ) -> None:
+    def __init__(self, log_path: Path, log_after_every: int = 1) -> None:
         self.log_path = log_path
+        self.log_after_every = max(0, log_after_every)
         self.episode_id = 0
         self.__name__ = "date_extraction_reward"
-        self.log_after_every = max(0, log_after_every)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text("")
 
@@ -298,43 +270,44 @@ class DateExtractionRewardFunction:
             expected_norm = _normalize_date(expected)
             json_valid, json_date_raw = _extract_json_response(completion_text)
 
-            if not json_valid:
-                predicted_norm = None
-                total_reward = -0.25
-                is_correct = False
+            if json_valid:
+                strict_predicted = _normalize_date(json_date_raw)
+                is_correct = expected_norm is not None and strict_predicted == expected_norm
+                reward = 1.0 if is_correct else 0.0
             else:
-                predicted_norm = _normalize_date(json_date_raw)
-                is_correct = expected_norm is not None and predicted_norm == expected_norm
-                total_reward = 1.0 if is_correct else 0.0
+                strict_predicted = None
+                is_correct = False
+                reward = -0.25
 
-            rewards.append(total_reward)
+            logged_predicted = strict_predicted if strict_predicted is not None else _normalize_date(completion_text)
+
+            rewards.append(reward)
             json_valid_count += int(json_valid)
             correct_count += int(is_correct)
             if sample_expected is None:
                 sample_expected = expected_norm
-                sample_predicted = predicted_norm
+                sample_predicted = logged_predicted
 
-            log_record = {
+            record = {
                 "episode_id": self.episode_id,
                 "steps": step,
                 "question": q,
                 "expected_date": expected_norm,
-                "predicted_date": predicted_norm,
+                "predicted_date": logged_predicted,
                 "json_valid": json_valid,
                 "is_correct": is_correct,
-                "total_reward": total_reward,
+                "total_reward": reward,
                 "prompt": _as_text(prompt),
                 "completion": completion_text,
             }
-            with self.log_path.open("a", encoding="utf-8") as file:
-                file.write(json.dumps(log_record) + "\n")
+            with self.log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
             self.episode_id += 1
 
         if rewards:
-            batch_size = len(rewards)
-            reward_mean = sum(rewards) / batch_size
-            json_valid_rate = json_valid_count / batch_size
-            accuracy = correct_count / batch_size
+            reward_mean = sum(rewards) / len(rewards)
+            json_rate = json_valid_count / len(rewards)
+            acc = correct_count / len(rewards)
             logical_step = max(step, 0)
             if self.log_after_every > 0 and (logical_step + 1) % self.log_after_every == 0:
                 LOGGER.info(
@@ -343,8 +316,8 @@ class DateExtractionRewardFunction:
                         [
                             ("steps", step),
                             ("reward", f"{reward_mean:.3f}"),
-                            ("json", f"{json_valid_rate * 100.0:.1f}%"),
-                            ("acc", f"{accuracy * 100.0:.1f}%"),
+                            ("json", f"{json_rate * 100.0:.1f}%"),
+                            ("acc", f"{acc * 100.0:.1f}%"),
                             ("expected", sample_expected),
                             ("predicted", sample_predicted if sample_predicted is not None else "null"),
                         ],
@@ -355,7 +328,7 @@ class DateExtractionRewardFunction:
         return rewards
 
 
-def make_lora_config():
+def make_lora_config() -> LoraConfig:
     if not LORA_TARGET_MODULES:
         raise ValueError("LORA_TARGET_MODULES must contain at least one module name")
     return LoraConfig(
@@ -393,7 +366,7 @@ def make_model_init_kwargs(args: argparse.Namespace, dtype: torch.dtype, device:
     return kwargs
 
 
-def main():
+def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     LOGGER.setLevel(logging.INFO)
@@ -420,7 +393,8 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_dataset = build_training_dataset(num_episodes=args.num_episodes, seed=args.seed)
+    env = DateNormalizationEnv(seed=args.seed)
+    train_dataset = env.build_dataset(args.num_episodes)
 
     if args.wandb:
         os.environ["WANDB_PROJECT"] = WANDB_PROJECT
@@ -451,7 +425,7 @@ def main():
         save_strategy="steps",
         save_steps=SAVE_STEPS,
         save_total_limit=2,
-        run_name="date_normalization",
+        run_name=env.NAME,
         report_to="wandb" if args.wandb else "none",
         remove_unused_columns=False,
         use_cpu=use_cpu,
