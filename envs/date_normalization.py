@@ -184,20 +184,9 @@ def _extract_json_response(completion_text: str) -> tuple[bool, str | None]:
 
 
 def _extract_expected_date(target_output: Any) -> str | None:
-    try:
-        data = json.loads(target_output)
-    except Exception:
-        return None
-
-    if not isinstance(data, list) or not data:
-        return None
+    data = json.loads(target_output)
     first = data[0]
-    if not isinstance(first, dict):
-        return None
-
     resolved_value = str(first.get("resolved_value", "")).strip()
-    if not ISO_DATE_PATTERN.fullmatch(resolved_value):
-        return None
     return resolved_value
 
 
