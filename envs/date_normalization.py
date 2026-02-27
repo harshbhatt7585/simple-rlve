@@ -110,18 +110,6 @@ class Episode:
     answer: str
 
 
-def _as_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        if value and isinstance(value[0], dict):
-            return str(value[0].get("content", ""))
-        return " ".join(str(x) for x in value)
-    if isinstance(value, dict):
-        return str(value.get("content", ""))
-    return str(value)
-
-
 def _parse_date_candidate(candidate: str) -> datetime | None:
     text = candidate.strip()
     if not text:
@@ -255,7 +243,7 @@ class DateExtractionRewardFunction:
         sample_predicted: str | None = None
 
         for prompt, completion, expected, q in zip(prompts, completions, answer, question, strict=True):
-            completion_text = _as_text(completion)
+            completion_text = str(completion)
             expected_norm = _normalize_date(expected)
             json_valid, json_date_raw = _extract_json_response(completion_text)
 
@@ -286,7 +274,7 @@ class DateExtractionRewardFunction:
                 "json_valid": json_valid,
                 "is_correct": is_correct,
                 "total_reward": reward,
-                "prompt": _as_text(prompt),
+                "prompt": str(prompt),
                 "completion": completion_text,
             }
             with self.log_path.open("a", encoding="utf-8") as f:
