@@ -78,7 +78,7 @@ ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--model_name", default="Qwen/Qwen2.5-0.5B-Instruct")
+    p.add_argument("--model_name", default="meta-llama/Llama-3.2-1B-Instruct")
     p.add_argument("--output_dir", default="rlvr_outputs/date_normalization")
     p.add_argument("--num_episodes", type=int, default=256)
     p.add_argument("--max_steps", type=int, default=60)
@@ -88,7 +88,20 @@ def parse_args() -> argparse.Namespace:
         choices=["cuda", "cpu"],
         help="Execution device (defaults to cuda).",
     )
+    p.add_argument("--load_in_8bit", action="store_true", help="Load the base model in 8-bit (bitsandbytes).")
     p.add_argument("--load_in_4bit", action="store_true", help="Load the base model in 4-bit (bitsandbytes).")
+    p.add_argument(
+        "--llm_int8_threshold",
+        type=float,
+        default=6.0,
+        help="Outlier threshold used by 8-bit quantization kernels.",
+    )
+    p.add_argument(
+        "--llm_int8_has_fp16_weight",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Whether 8-bit modules keep FP16 main weights.",
+    )
     p.add_argument("--bnb_4bit_quant_type", default="nf4", choices=["nf4", "fp4"])
     p.add_argument("--bnb_4bit_use_double_quant", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument(
@@ -347,25 +360,33 @@ def make_lora_config() -> LoraConfig:
 
 
 def make_model_init_kwargs(args: argparse.Namespace, dtype: torch.dtype, device: str) -> dict:
-    kwargs = {"torch_dtype": dtype}
-    if not args.load_in_4bit:
+    use_quantized = args.load_in_4bit or args.load_in_8bit
+    # QLoRA-style path: keep adapter math in BF16 and use BF16 compute for quantized kernels.
+    kwargs = {"torch_dtype": torch.bfloat16 if use_quantized else dtype}
+    if not args.load_in_4bit and not args.load_in_8bit:
         return kwargs
+    if args.load_in_4bit and args.load_in_8bit:
+        raise ValueError("Use only one quantization mode at a time: --load_in_4bit or --load_in_8bit.")
     if device != "cuda":
-        raise ValueError("--load_in_4bit requires CUDA; set --device cuda and run on a CUDA GPU.")
+        quant_mode = "--load_in_4bit" if args.load_in_4bit else "--load_in_8bit"
+        raise ValueError(f"{quant_mode} requires CUDA; set --device cuda and run on a CUDA GPU.")
 
     from transformers import BitsAndBytesConfig
 
-    compute_dtype_map = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }
-    compute_dtype = compute_dtype_map.get(args.bnb_4bit_compute_dtype, dtype)
+    if args.load_in_8bit:
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=args.llm_int8_threshold,
+            llm_int8_has_fp16_weight=args.llm_int8_has_fp16_weight,
+        )
+        kwargs["device_map"] = "auto"
+        return kwargs
+
     kwargs["quantization_config"] = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type=args.bnb_4bit_quant_type,
         bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
-        bnb_4bit_compute_dtype=compute_dtype,
+        bnb_4bit_compute_dtype=torch.bfloat16,
     )
     kwargs["device_map"] = "auto"
     return kwargs
@@ -383,16 +404,29 @@ def main() -> None:
     if args.device == "cuda" and not torch.cuda.is_available():
         LOGGER.warning("CUDA requested via --device cuda but no CUDA device is available; falling back to CPU.")
         args.device = "cpu"
+    if args.load_in_4bit and args.load_in_8bit:
+        raise ValueError("Use only one quantization mode at a time: --load_in_4bit or --load_in_8bit.")
 
     has_cuda = args.device == "cuda"
+    use_quantized = args.load_in_4bit or args.load_in_8bit
+    if use_quantized and not has_cuda:
+        raise ValueError("Quantized training requires CUDA. Set --device cuda and run on a CUDA GPU.")
+    if use_quantized and not torch.cuda.is_bf16_supported():
+        raise ValueError("QLoRA-style BF16 training requires a BF16-capable CUDA GPU.")
+    if args.load_in_4bit and args.bnb_4bit_compute_dtype != "bfloat16":
+        LOGGER.warning("Overriding --bnb_4bit_compute_dtype=%s to bfloat16 for QLoRA BF16 mode.", args.bnb_4bit_compute_dtype)
+
     use_cpu = not has_cuda
-    use_bf16 = has_cuda and torch.cuda.is_bf16_supported()
+    use_bf16 = has_cuda and (torch.cuda.is_bf16_supported() or use_quantized)
     use_fp16 = has_cuda and not use_bf16
     dtype = torch.bfloat16 if use_bf16 else (torch.float16 if use_fp16 else torch.float32)
 
     use_vllm = USE_VLLM
     if use_cpu and use_vllm:
         LOGGER.warning("Disabling vLLM because --device is set to cpu.")
+        use_vllm = False
+    if args.load_in_8bit and use_vllm:
+        LOGGER.warning("Disabling vLLM because --load_in_8bit is not supported with colocated vLLM.")
         use_vllm = False
 
     output_dir = Path(args.output_dir)
@@ -471,9 +505,10 @@ def main() -> None:
     trainer.remove_callback(PrinterCallback)
 
     LOGGER.info(
-        "Starting training | device=%s bf16=%s 4bit=%s log_after_every=%s",
+        "Starting training | device=%s bf16=%s 8bit=%s 4bit=%s log_after_every=%s",
         args.device,
         use_bf16,
+        args.load_in_8bit,
         args.load_in_4bit,
         args.log_after_every,
     )
