@@ -141,33 +141,35 @@ def _parse_date_candidate(candidate: str) -> datetime | None:
     return None
 
 
-def _normalize_date(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-
-    candidates = [text]
-    candidates.extend(DATE_VALUE_PATTERN.findall(text))
-    for candidate in candidates:
-        parsed = _parse_date_candidate(candidate)
-        if parsed is not None:
-            return parsed.strftime("%Y-%m-%d")
-    return None
-
-
-def _extract_json_response(completion_text: str) -> tuple[bool, str | None]:
+def _extract_json_response(completion_text: str, strict_json_only: bool = True) -> tuple[bool, str | None]:
     raw = completion_text.strip()
     if not raw:
         return False, None
 
+    def normalize_candidate(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        candidates = [text]
+        candidates.extend(DATE_VALUE_PATTERN.findall(text))
+        for candidate in candidates:
+            parsed = _parse_date_candidate(candidate)
+            if parsed is not None:
+                return parsed.strftime("%Y-%m-%d")
+        return None
+
     try:
         data = json.loads(raw)
         if isinstance(data, dict) and set(data.keys()) == {"date"} and isinstance(data.get("date"), str):
-            return True, data["date"].strip()
+            return True, normalize_candidate(data.get("date"))
     except Exception:
         pass
+
+    if not strict_json_only:
+        return False, normalize_candidate(raw)
+
     return False, None
 
 
@@ -251,10 +253,9 @@ class DateExtractionRewardFunction:
             else:
                 completion_text = str(completion)
             expected_norm = str(expected).strip() if expected is not None else None
-            json_valid, json_date_raw = _extract_json_response(completion_text)
+            json_valid, strict_predicted = _extract_json_response(completion_text, strict_json_only=True)
 
             if json_valid:
-                strict_predicted = _normalize_date(json_date_raw)
                 year_correct = False
                 month_correct = False
                 day_correct = False
@@ -279,7 +280,10 @@ class DateExtractionRewardFunction:
                 month_correct = False
                 day_correct = False
 
-            logged_predicted = strict_predicted if strict_predicted is not None else _normalize_date(completion_text)
+            if strict_predicted is not None:
+                logged_predicted = strict_predicted
+            else:
+                _, logged_predicted = _extract_json_response(completion_text, strict_json_only=False)
 
             rewards.append(reward)
             json_valid_count += int(json_valid)
