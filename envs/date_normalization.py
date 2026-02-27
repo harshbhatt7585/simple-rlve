@@ -105,7 +105,7 @@ def parse_args() -> argparse.Namespace:
 
 @dataclass
 class Episode:
-    prompt: str
+    prompt: list[dict[str, str]]
     question: str
     answer: str
 
@@ -188,8 +188,11 @@ class DateNormalizationEnv:
             raise ValueError("Loaded dataset split is empty.")
 
     @staticmethod
-    def _build_prompt(question: str) -> str:
-        return f"{PROMPT_TEMPLATE}\nSentence: {question}"
+    def _build_prompt(question: str) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": PROMPT_TEMPLATE.strip()},
+            {"role": "user", "content": f"Sentence: {question}"},
+        ]
 
     def _load_split(self) -> Dataset:
         DATASET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -243,7 +246,10 @@ class DateExtractionRewardFunction:
         sample_predicted: str | None = None
 
         for prompt, completion, expected, q in zip(prompts, completions, answer, question, strict=True):
-            completion_text = str(completion)
+            if isinstance(completion, list) and completion and isinstance(completion[0], dict):
+                completion_text = str(completion[0].get("content", ""))
+            else:
+                completion_text = str(completion)
             expected_norm = _normalize_date(expected)
             json_valid, json_date_raw = _extract_json_response(completion_text)
 
@@ -294,7 +300,7 @@ class DateExtractionRewardFunction:
                 "day_correct": day_correct,
                 "is_correct": is_correct,
                 "total_reward": reward,
-                "prompt": str(prompt),
+                "prompt": prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False),
                 "completion": completion_text,
             }
             with self.log_path.open("a", encoding="utf-8") as f:
