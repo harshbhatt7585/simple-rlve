@@ -137,7 +137,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log_after_every", type=int, default=1)
     p.add_argument("--wandb", action="store_true")
-    p.add_argument("--weave", action="store_true", help="Log per-completion traces to Weave/W&B.")
+    p.add_argument(
+        "--weave",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Log per-completion traces to Weave/W&B. Use --no-weave to disable.",
+    )
     p.add_argument(
         "--weave_project",
         default=None,
