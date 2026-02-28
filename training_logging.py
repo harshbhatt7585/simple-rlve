@@ -29,6 +29,7 @@ def configure_external_logs(show_external_logs: bool = False) -> None:
 
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    os.environ.setdefault("WEAVE_PRINT_CALL_LINK", "false")
 
     warnings.filterwarnings(
         "ignore",
@@ -65,6 +66,11 @@ def configure_external_logs(show_external_logs: bool = False) -> None:
         "transformers",
         "accelerate",
         "wandb",
+        "weave",
+        "weave.trace",
+        "weave.trace.weave_client",
+        "weave.trace.init_message",
+        "weave.trace.weave_init",
     ):
         logging.getLogger(logger_name).setLevel(logging.ERROR)
 
