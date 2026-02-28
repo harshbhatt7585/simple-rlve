@@ -64,27 +64,6 @@ LORA_TARGET_MODULES = (
 
 DATASET_ID = "namesarnav/time_expressions_dataset"
 DATASET_CACHE_DIR = PROJECT_ROOT / ".hf_datasets_cache"
-DEEPSEEK_R1_DISTILL_QWEN_1_5B = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-DEEPSEEK_R1_QWEN_CHAT_TEMPLATE = """{%- if messages[0]['role'] == 'system' -%}
-    {%- set system_message = messages[0]['content'] -%}
-    {%- set loop_messages = messages[1:] -%}
-{%- else -%}
-    {%- set system_message = '' -%}
-    {%- set loop_messages = messages -%}
-{%- endif -%}
-{{- bos_token if bos_token is not none else '' -}}
-{{- system_message + '\n' if system_message else '' -}}
-{%- for message in loop_messages -%}
-    {%- if message['role'] == 'user' -%}
-        {{- '<\uff5cUser\uff5c>' + message['content'] -}}
-    {%- elif message['role'] == 'assistant' -%}
-        {{- '<\uff5cAssistant\uff5c>' + message['content'] + '<\uff5cend\u2581of\u2581sentence\uff5c>' -}}
-    {%- endif -%}
-{%- endfor -%}
-{%- if add_generation_prompt -%}
-    {{- '<\uff5cAssistant\uff5c>' -}}
-{%- endif -%}
-"""
 PROMPT_TEMPLATE = """You are given a sentence that may contain a relative time expression.
 Normalize the expression to the final calendar date.
 
@@ -511,13 +490,6 @@ def make_model_init_kwargs(args: argparse.Namespace, dtype: torch.dtype, device:
     )
     kwargs["device_map"] = "auto"
     return kwargs
-
-
-def _use_deepseek_r1_qwen_chat_template(model_name: str) -> bool:
-    normalized = model_name.strip().lower()
-    return normalized.startswith("deepseek-ai/deepseek-r1-distill-qwen")
-
-
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -571,9 +543,6 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    if _use_deepseek_r1_qwen_chat_template(args.model_name):
-        # Keep the reasoning tokens in the generated text so reward parsing can strip them explicitly.
-        tokenizer.chat_template = DEEPSEEK_R1_QWEN_CHAT_TEMPLATE
 
     reward_fn = DateExtractionRewardFunction(
         output_dir / "episode_rewards.jsonl",
