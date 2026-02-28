@@ -41,7 +41,7 @@ VLLM_MAX_MODEL_LENGTH = 512
 PER_DEVICE_TRAIN_BATCH_SIZE = 4
 GRADIENT_ACCUMULATION_STEPS = 8
 NUM_GENERATIONS = 4
-MAX_COMPLETION_LENGTH = 32
+MAX_COMPLETION_LENGTH = 320
 LEARNING_RATE = 1e-5
 TEMPERATURE = 0.7
 BETA = 0.04
@@ -64,6 +64,27 @@ LORA_TARGET_MODULES = (
 
 DATASET_ID = "namesarnav/time_expressions_dataset"
 DATASET_CACHE_DIR = PROJECT_ROOT / ".hf_datasets_cache"
+DEEPSEEK_R1_DISTILL_QWEN_1_5B = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+DEEPSEEK_R1_QWEN_CHAT_TEMPLATE = """{%- if messages[0]['role'] == 'system' -%}
+    {%- set system_message = messages[0]['content'] -%}
+    {%- set loop_messages = messages[1:] -%}
+{%- else -%}
+    {%- set system_message = '' -%}
+    {%- set loop_messages = messages -%}
+{%- endif -%}
+{{- bos_token if bos_token is not none else '' -}}
+{{- system_message + '\n' if system_message else '' -}}
+{%- for message in loop_messages -%}
+    {%- if message['role'] == 'user' -%}
+        {{- '<\uff5cUser\uff5c>' + message['content'] -}}
+    {%- elif message['role'] == 'assistant' -%}
+        {{- '<\uff5cAssistant\uff5c>' + message['content'] + '<\uff5cend\u2581of\u2581sentence\uff5c>' -}}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- '<\uff5cAssistant\uff5c>' -}}
+{%- endif -%}
+"""
 PROMPT_TEMPLATE = """You are given a sentence that may contain a relative time expression.
 Normalize the expression to the final calendar date.
 
@@ -74,11 +95,14 @@ Output requirements:
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+JSON_OBJECT_PATTERN = re.compile(r"\{.*?\}", re.DOTALL)
+THINK_BLOCK_PATTERN = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
+THINK_TAG_PATTERN = re.compile(r"</?think\b[^>]*>", re.IGNORECASE)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--model_name", default="Qwen/Qwen2.5-3B-Instruct")
+    p.add_argument("--model_name", default=DEEPSEEK_R1_DISTILL_QWEN_1_5B)
     p.add_argument("--output_dir", default="rlvr_outputs/date_normalization")
     p.add_argument("--num_episodes", type=int, default=20)
     p.add_argument("--max_steps", type=int, default=60)
@@ -154,8 +178,30 @@ def _parse_date_candidate(candidate: str) -> datetime | None:
     return None
 
 
+def _strip_reasoning_blocks(text: str) -> str:
+    cleaned = THINK_BLOCK_PATTERN.sub(" ", text)
+    cleaned = THINK_TAG_PATTERN.sub(" ", cleaned)
+    return cleaned.strip()
+
+
+def _json_candidates(text: str) -> list[str]:
+    candidates = [text]
+    candidates.extend(match.group(0) for match in JSON_OBJECT_PATTERN.finditer(text))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
 def _extract_json_response(completion_text: str, strict_json_only: bool = True) -> tuple[bool, str | None]:
     raw = completion_text.strip()
+    if not raw:
+        return False, None
+    raw = _strip_reasoning_blocks(raw)
     if not raw:
         return False, None
 
@@ -173,12 +219,13 @@ def _extract_json_response(completion_text: str, strict_json_only: bool = True) 
                 return parsed.strftime("%Y-%m-%d")
         return None
 
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict) and set(data.keys()) == {"date"} and isinstance(data.get("date"), str):
-            return True, normalize_candidate(data.get("date"))
-    except Exception:
-        pass
+    for candidate in _json_candidates(raw):
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict) and set(data.keys()) == {"date"} and isinstance(data.get("date"), str):
+                return True, normalize_candidate(data.get("date"))
+        except Exception:
+            continue
 
     if not strict_json_only:
         return False, normalize_candidate(raw)
@@ -392,6 +439,11 @@ def make_model_init_kwargs(args: argparse.Namespace, dtype: torch.dtype, device:
     return kwargs
 
 
+def _use_deepseek_r1_qwen_chat_template(model_name: str) -> bool:
+    normalized = model_name.strip().lower()
+    return normalized.startswith("deepseek-ai/deepseek-r1-distill-qwen")
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -441,6 +493,9 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if _use_deepseek_r1_qwen_chat_template(args.model_name):
+        # Keep the reasoning tokens in the generated text so reward parsing can strip them explicitly.
+        tokenizer.chat_template = DEEPSEEK_R1_QWEN_CHAT_TEMPLATE
 
     reward_fn = DateExtractionRewardFunction(
         output_dir / "episode_rewards.jsonl",
