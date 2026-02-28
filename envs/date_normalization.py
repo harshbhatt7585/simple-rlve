@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from training_logging import MetricsJSONLCallback, configure_external_logs, format_terminal_log
+from training_logging import MetricsJSONLCallback, WeaveTraceLogger, configure_external_logs, format_terminal_log
 
 LOGGER = logging.getLogger("rlvr")
 WANDB_PROJECT = "RLVR"
@@ -137,6 +137,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log_after_every", type=int, default=1)
     p.add_argument("--wandb", action="store_true")
+    p.add_argument("--weave", action="store_true", help="Log per-completion traces to Weave/W&B.")
+    p.add_argument(
+        "--weave_project",
+        default=None,
+        help="Weave project name. Accepts either `project` or `entity/project`.",
+    )
     return p.parse_args()
 
 
@@ -283,9 +289,15 @@ class DateNormalizationEnv:
 class DateExtractionRewardFunction:
     """Reward function with strict JSON checks and built-in logging."""
 
-    def __init__(self, log_path: Path, log_after_every: int = 1) -> None:
+    def __init__(
+        self,
+        log_path: Path,
+        log_after_every: int = 1,
+        weave_logger: WeaveTraceLogger | None = None,
+    ) -> None:
         self.log_path = log_path
         self.log_after_every = max(0, log_after_every)
+        self.weave_logger = weave_logger
         self.episode_id = 0
         self.__name__ = "date_extraction_reward"
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -369,6 +381,13 @@ class DateExtractionRewardFunction:
             }
             with self.log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
+            if self.weave_logger is not None:
+                self.weave_logger.log_llm_completion(
+                    prompt=record["prompt"],
+                    expected_date=expected_norm,
+                    completion=completion_text,
+                    reward=reward,
+                )
             self.episode_id += 1
 
         if rewards:
@@ -490,6 +509,10 @@ def main() -> None:
     if args.wandb:
         os.environ["WANDB_PROJECT"] = WANDB_PROJECT
 
+    weave_logger = WeaveTraceLogger(
+        enabled=args.weave,
+        project_name=args.weave_project or os.environ.get("WANDB_PROJECT") or WANDB_PROJECT,
+    )
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -500,6 +523,7 @@ def main() -> None:
     reward_fn = DateExtractionRewardFunction(
         output_dir / "episode_rewards.jsonl",
         log_after_every=args.log_after_every,
+        weave_logger=weave_logger,
     )
     callback = MetricsJSONLCallback(
         output_dir / "training_metrics.jsonl",

@@ -16,6 +16,7 @@ dependencies = [
     "accelerate>=0.34.0",
     "peft>=0.12.0",
     "wandb>=0.18.0",
+    "weave>=0.51.0",
 ]
 
 [build-system]

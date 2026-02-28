@@ -148,6 +148,110 @@ def format_terminal_log(
     return f"{tag} " + "  ".join(rendered_fields)
 
 
+class WeaveTraceLogger:
+    """Best-effort Weave tracer for simple per-completion input/output logging."""
+
+    def __init__(self, enabled: bool = False, project_name: str | None = None) -> None:
+        self.enabled = False
+        self.project_name = project_name
+        self._trace_completion = None
+
+        if not enabled:
+            return
+
+        resolved_project = self._resolve_project_name(project_name)
+        if not resolved_project:
+            LOGGER.warning("Weave requested but no project name was resolved.")
+            return
+
+        try:
+            import weave
+        except Exception:
+            LOGGER.warning("Weave requested but the `weave` package is not installed.")
+            return
+
+        try:
+            weave.init(resolved_project)
+
+            def postprocess_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "prompt": inputs.get("prompt"),
+                    "expected_date": inputs.get("expected_date"),
+                }
+
+            @weave.op(
+                name="rlvr_llm_completion",
+                kind="llm",
+                postprocess_inputs=postprocess_inputs,
+            )
+            def trace_completion(
+                prompt: Any,
+                expected_date: str | None,
+                completion: str,
+                reward: float,
+            ) -> dict[str, Any]:
+                return {
+                    "completion": completion,
+                    "reward": reward,
+                }
+
+            self._trace_completion = trace_completion
+            self.project_name = resolved_project
+            self.enabled = True
+        except Exception as exc:
+            LOGGER.warning("Failed to initialize Weave tracing: %s", exc)
+
+    @staticmethod
+    def _resolve_project_name(project_name: str | None) -> str | None:
+        if project_name:
+            return project_name.strip() or None
+
+        try:
+            import wandb
+
+            run = getattr(wandb, "run", None)
+            if run is not None:
+                entity = getattr(run, "entity", None)
+                project = getattr(run, "project", None)
+                if entity and project:
+                    return f"{entity}/{project}"
+                if project:
+                    return str(project)
+        except Exception:
+            pass
+
+        env_project = os.environ.get("WANDB_PROJECT") or os.environ.get("WEAVE_PROJECT")
+        env_entity = os.environ.get("WANDB_ENTITY") or os.environ.get("WEAVE_ENTITY")
+        if env_project:
+            if "/" in env_project:
+                return env_project
+            if env_entity:
+                return f"{env_entity}/{env_project}"
+            return env_project
+        return None
+
+    def log_llm_completion(
+        self,
+        *,
+        prompt: Any,
+        expected_date: str | None,
+        completion: str,
+        reward: float,
+    ) -> None:
+        if not self.enabled or self._trace_completion is None:
+            return
+
+        try:
+            self._trace_completion(
+                prompt=prompt,
+                expected_date=expected_date,
+                completion=completion,
+                reward=reward,
+            )
+        except Exception:
+            pass
+
+
 class EpisodeRewardLogger:
     """Custom reward function that logs every generated episode."""
 
