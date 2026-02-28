@@ -38,10 +38,10 @@ VLLM_MODE = "colocate"
 VLLM_GPU_MEMORY_UTILIZATION = 0.5
 VLLM_ENABLE_SLEEP_MODE = False
 VLLM_MAX_MODEL_LENGTH = 512
-PER_DEVICE_TRAIN_BATCH_SIZE = 4
+PER_DEVICE_TRAIN_BATCH_SIZE = 8
 GRADIENT_ACCUMULATION_STEPS = 8
 NUM_GENERATIONS = 4
-MAX_COMPLETION_LENGTH = 4096
+MAX_COMPLETION_LENGTH = 1028
 LEARNING_RATE = 1e-5
 TEMPERATURE = 0.7
 BETA = 0.04
@@ -88,10 +88,26 @@ DEEPSEEK_R1_QWEN_CHAT_TEMPLATE = """{%- if messages[0]['role'] == 'system' -%}
 PROMPT_TEMPLATE = """You are given a sentence that may contain a relative time expression.
 Normalize the expression to the final calendar date.
 
+Reason step by step:
+1. Find the anchor date.
+2. Identify the relative direction and amount.
+3. Apply the calendar arithmetic once.
+4. Put the reasoning inside <think>...</think>.
+5. After the </think> block, return the final JSON answer.
+
+Examples:
+Sentence: The Berlin Wall fell on November 9, 1989, and I visited a week later.
+Output: <think>Anchor date is 1989-11-09. One week later means add 7 days. Final date is 1989-11-16.</think>
+{"date":"1989-11-16"}
+
+Sentence: The hearing was on July 4, 2021, and the follow-up happened 2 months after.
+Output: <think>Anchor date is 2021-07-04. Two months after means add 2 months. Final date is 2021-09-04.</think>
+{"date":"2021-09-04"}
+
 Output requirements:
-- Return JSON only.
-- No explanation, no markdown, no extra keys.
-- Use this exact schema: {"date":"YYYY-MM-DD"}
+- First return one <think>...</think> block containing the reasoning.
+- Then return exactly one JSON object with no extra keys.
+- Use this exact schema for the final answer: {"date":"YYYY-MM-DD"}
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -102,7 +118,7 @@ THINK_TAG_PATTERN = re.compile(r"</?think\b[^>]*>", re.IGNORECASE)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--model_name", default=DEEPSEEK_R1_DISTILL_QWEN_1_5B)
+    p.add_argument("--model_name", default="Qwen/Qwen2-1.5B-Instruct")
     p.add_argument("--output_dir", default="rlvr_outputs/date_normalization")
     p.add_argument("--num_episodes", type=int, default=20)
     p.add_argument("--max_steps", type=int, default=60)
@@ -195,6 +211,22 @@ def _strip_reasoning_blocks(text: str) -> str:
     return cleaned.strip()
 
 
+def _extract_think_reasoning(text: str) -> str | None:
+    matches = THINK_BLOCK_PATTERN.findall(text)
+    if not matches:
+        return None
+
+    chunks: list[str] = []
+    for match in matches:
+        cleaned = THINK_TAG_PATTERN.sub(" ", match)
+        cleaned = " ".join(cleaned.split()).strip()
+        if cleaned:
+            chunks.append(cleaned)
+    if not chunks:
+        return None
+    return "\n".join(chunks)
+
+
 def _json_candidates(text: str) -> list[str]:
     candidates = [text]
     candidates.extend(match.group(0) for match in JSON_OBJECT_PATTERN.finditer(text))
@@ -208,13 +240,17 @@ def _json_candidates(text: str) -> list[str]:
     return ordered
 
 
-def _extract_json_response(completion_text: str, strict_json_only: bool = True) -> tuple[bool, str | None]:
+def _extract_json_response(
+    completion_text: str,
+    strict_json_only: bool = True,
+) -> tuple[bool, str | None, str | None]:
     raw = completion_text.strip()
     if not raw:
-        return False, None
+        return False, None, None
+    think_reasoning = _extract_think_reasoning(raw)
     raw = _strip_reasoning_blocks(raw)
     if not raw:
-        return False, None
+        return False, None, think_reasoning
 
     def normalize_candidate(value: Any) -> str | None:
         if value is None:
@@ -233,15 +269,21 @@ def _extract_json_response(completion_text: str, strict_json_only: bool = True) 
     for candidate in _json_candidates(raw):
         try:
             data = json.loads(candidate)
-            if isinstance(data, dict) and set(data.keys()) == {"date"} and isinstance(data.get("date"), str):
-                return True, normalize_candidate(data.get("date"))
+            if (
+                isinstance(data, dict)
+                and set(data.keys()) == {"date"}
+                and isinstance(data.get("date"), str)
+            ):
+                return True, normalize_candidate(data.get("date")), think_reasoning
+            if not strict_json_only and isinstance(data, dict) and "date" in data:
+                return False, normalize_candidate(data.get("date")), think_reasoning
         except Exception:
             continue
 
     if not strict_json_only:
-        return False, normalize_candidate(raw)
+        return False, normalize_candidate(raw), think_reasoning
 
-    return False, None
+    return False, None, think_reasoning
 
 
 def _extract_expected_date(target_output: Any) -> str | None:
@@ -321,8 +363,10 @@ class DateExtractionRewardFunction:
         step = int(trainer_state.global_step) if trainer_state is not None else -1
         json_valid_count = 0
         correct_count = 0
+        reasoning_present_count = 0
         sample_expected: str | None = None
         sample_predicted: str | None = None
+        sample_reasoning: str | None = None
 
         for prompt, completion, expected, q in zip(prompts, completions, answer, question, strict=True):
             if isinstance(completion, list) and completion and isinstance(completion[0], dict):
@@ -330,44 +374,46 @@ class DateExtractionRewardFunction:
             else:
                 completion_text = str(completion)
             expected_norm = str(expected).strip() if expected is not None else None
-            json_valid, strict_predicted = _extract_json_response(completion_text, strict_json_only=True)
+            json_valid, strict_predicted, strict_reasoning = _extract_json_response(completion_text, strict_json_only=True)
+            _, logged_predicted, logged_reasoning = _extract_json_response(completion_text, strict_json_only=False)
+            predicted_for_reward = strict_predicted if strict_predicted is not None else logged_predicted
+            reasoning_for_reward = strict_reasoning if strict_reasoning is not None else logged_reasoning
 
-            if json_valid:
-                year_correct = False
-                month_correct = False
-                day_correct = False
-                if (
-                    expected_norm is not None
-                    and strict_predicted is not None
-                    and ISO_DATE_PATTERN.fullmatch(expected_norm)
-                    and ISO_DATE_PATTERN.fullmatch(strict_predicted)
-                ):
-                    exp_year, exp_month, exp_day = expected_norm.split("-")
-                    pred_year, pred_month, pred_day = strict_predicted.split("-")
-                    year_correct = exp_year == pred_year
-                    month_correct = exp_month == pred_month
-                    day_correct = exp_day == pred_day
-                reward = (int(year_correct) + int(month_correct) + int(day_correct)) / 3.0
-                is_correct = year_correct and month_correct and day_correct
-            else:
-                strict_predicted = None
-                is_correct = False
+            year_correct = False
+            month_correct = False
+            day_correct = False
+            if (
+                expected_norm is not None
+                and predicted_for_reward is not None
+                and ISO_DATE_PATTERN.fullmatch(expected_norm)
+                and ISO_DATE_PATTERN.fullmatch(predicted_for_reward)
+            ):
+                exp_year, exp_month, exp_day = expected_norm.split("-")
+                pred_year, pred_month, pred_day = predicted_for_reward.split("-")
+                year_correct = exp_year == pred_year
+                month_correct = exp_month == pred_month
+                day_correct = exp_day == pred_day
+
+            reasoning_present = bool(reasoning_for_reward)
+            date_reward = (int(year_correct) + int(month_correct) + int(day_correct)) / 3.0
+            is_correct = year_correct and month_correct and day_correct
+            if predicted_for_reward is None:
                 reward = -0.25
-                year_correct = False
-                month_correct = False
-                day_correct = False
-
-            if strict_predicted is not None:
-                logged_predicted = strict_predicted
             else:
-                _, logged_predicted = _extract_json_response(completion_text, strict_json_only=False)
+                reward = 0.8 * date_reward
+                if reasoning_present:
+                    reward += 0.1
+                if json_valid:
+                    reward += 0.1
 
             rewards.append(reward)
             json_valid_count += int(json_valid)
             correct_count += int(is_correct)
+            reasoning_present_count += int(reasoning_present)
             if sample_expected is None:
                 sample_expected = expected_norm
                 sample_predicted = logged_predicted
+                sample_reasoning = logged_reasoning
 
             record = {
                 "episode_id": self.episode_id,
@@ -375,7 +421,9 @@ class DateExtractionRewardFunction:
                 "question": q,
                 "expected_date": expected_norm,
                 "predicted_date": logged_predicted,
+                "predicted_reasoning": logged_reasoning,
                 "json_valid": json_valid,
+                "reasoning_present": reasoning_present,
                 "year_correct": year_correct,
                 "month_correct": month_correct,
                 "day_correct": day_correct,
@@ -398,6 +446,7 @@ class DateExtractionRewardFunction:
         if rewards:
             reward_mean = sum(rewards) / len(rewards)
             json_rate = json_valid_count / len(rewards)
+            reasoning_rate = reasoning_present_count / len(rewards)
             logical_step = max(step, 0)
             if self.log_after_every > 0 and (logical_step + 1) % self.log_after_every == 0:
                 LOGGER.info(
@@ -407,8 +456,10 @@ class DateExtractionRewardFunction:
                             ("steps", step),
                             ("reward", f"{reward_mean:.3f}"),
                             ("json", f"{json_rate * 100.0:.1f}%"),
+                            ("reas", f"{reasoning_rate * 100.0:.1f}%"),
                             ("expected", sample_expected),
                             ("predicted", sample_predicted if sample_predicted is not None else "null"),
+                            ("reasoning", sample_reasoning if sample_reasoning is not None else "null"),
                         ],
                         color_code="34",
                     )
