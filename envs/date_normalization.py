@@ -43,7 +43,7 @@ GRADIENT_ACCUMULATION_STEPS = 8
 NUM_GENERATIONS = 4
 MAX_COMPLETION_LENGTH = 32
 LEARNING_RATE = 1e-5
-TEMPERATURE = 1
+TEMPERATURE = 0.7
 BETA = 0.04
 SAVE_STEPS = 20
 NUM_ITERATIONS = 1
@@ -78,9 +78,9 @@ ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--model_name", default="meta-llama/Llama-3.2-1B-Instruct")
+    p.add_argument("--model_name", default="Qwen/Qwen2.5-3B-Instruct")
     p.add_argument("--output_dir", default="rlvr_outputs/date_normalization")
-    p.add_argument("--num_episodes", type=int, default=256)
+    p.add_argument("--num_episodes", type=int, default=20)
     p.add_argument("--max_steps", type=int, default=60)
     p.add_argument(
         "--device",
