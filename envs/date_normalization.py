@@ -105,9 +105,8 @@ Output: <think>Anchor date is 2021-07-04. Two months after means add 2 months. F
 {"date":"2021-09-04"}
 
 Output requirements:
-- First return one <think>...</think> block containing the reasoning.
+- First return one <think>...</think> block containing the reasoning which is required.
 - Then return exactly one JSON object with no extra keys.
-- Use this exact schema for the final answer: {"date":"YYYY-MM-DD"}
 """
 DATE_VALUE_PATTERN = re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b")
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -317,7 +316,7 @@ class DateNormalizationEnv:
         for split_name in ("train", "validation", "test"):
             if split_name in dataset:
                 return dataset[split_name]
-        return next(iter(dataset.values()))
+        return next(iter(dataset.values()[:100]))
 
     def sample(self) -> Episode:
         for _ in range(1024):
